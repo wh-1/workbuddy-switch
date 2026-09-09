@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 
 use tauri::Emitter;
 use wb_switch_core::modules::{
-    account, auth_file, checkin, codebuddy_cli, codebuddy_cn_ide, credit_usage, credits, export_import, oauth,
+    account, align, auth_file, checkin, codebuddy_cli, codebuddy_cn_ide, credit_usage, credits, export_import, oauth,
     process, refresh, rotate, session, switch, token_stats, update,
 };
 
@@ -261,27 +261,68 @@ pub fn reveal_app_in_finder() -> Result<(), String> {
 pub async fn switch_account(
     app: tauri::AppHandle,
     account_id: String,
-    restart: Option<bool>,
-    share_sessions: Option<bool>,
-    copy_session_ids: Option<Vec<String>>,
+    options: Option<switch::SwitchOptions>,
 ) -> Result<Value, String> {
     if account_id.trim().is_empty() {
         return Err("缺少 accountId".to_string());
     }
-    let restart = restart.unwrap_or(true);
-    let share_sessions = share_sessions.unwrap_or(false);
-    let copy_ids = copy_session_ids.unwrap_or_default();
+    let mut opts = options.unwrap_or_default();
+    opts.restart = true;
     let progress: switch::ProgressFn = Box::new(move |message| {
         let _ = app.emit("switch-progress", json!({ "message": message }));
     });
     tauri::async_runtime::spawn_blocking(move || {
-        switch::switch_account(
-            Some(&progress),
-            &account_id,
-            restart,
-            share_sessions,
-            &copy_ids,
-        )
+        switch::switch_account(Some(&progress), &account_id, &opts)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// POST /api/automations/align —— 不切号，把当前自动化归属立即对齐到指定账号
+/// （适用于：先用旧版切完号、补做归属对齐的场景）。需先完全退出 WorkBuddy。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn align_automations(account_id: String) -> Result<Value, String> {
+    if account_id.trim().is_empty() {
+        return Err("缺少 accountId".to_string());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let target = account::find_account(&account_id).ok_or("账号不存在")?;
+        let uid = align::account_uid(&target);
+        if uid.is_empty() {
+            return Err("该账号缺少 uid，无法对齐".to_string());
+        }
+        align::align_automations_owner(&uid).ok_or_else(|| "workbuddy.db 不存在".to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// POST /api/align/data —— 多账号数据全量对齐（L1 备份 + L3 归属 + L4 文件 + L5 合并），
+/// 不切号不写凭据。需先完全退出 WorkBuddy（dryRun=true 时只预览不落盘）。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn align_data(
+    account_id: String,
+    align_automations: Option<bool>,
+    align_sessions: Option<bool>,
+    align_files: Option<bool>,
+    dry_run: Option<bool>,
+) -> Result<Value, String> {
+    if account_id.trim().is_empty() {
+        return Err("缺少 accountId".to_string());
+    }
+    let opts = align::AlignOptions {
+        align_automations: align_automations.unwrap_or(true),
+        align_sessions: align_sessions.unwrap_or(false),
+        align_files: align_files.unwrap_or(false),
+        dry_run: dry_run.unwrap_or(false),
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        let target = account::find_account(&account_id).ok_or("账号不存在")?;
+        let uid = align::account_uid(&target);
+        if uid.is_empty() {
+            return Err("该账号缺少 uid，无法对齐".to_string());
+        }
+        Ok(align::align_data(&uid, None, &opts))
     })
     .await
     .map_err(|e| e.to_string())?

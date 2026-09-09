@@ -17,7 +17,7 @@ import {
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
 import * as api from "@/lib/api";
-import type { AccountMeta, Session } from "@/lib/types";
+import type { AccountMeta, AlignDataReport, Session } from "@/lib/types";
 
 interface Props {
   open: boolean;
@@ -33,6 +33,11 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone }: Pro
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loadingSessions, setLoadingSessions] = useState(false);
   const [copySessions, setCopySessions] = useState(false);
+  const [alignAutomations, setAlignAutomations] = useState(true);
+  const [alignSessions, setAlignSessions] = useState(false);
+  const [alignFiles, setAlignFiles] = useState(false);
+  const [previewLines, setPreviewLines] = useState<string[] | null>(null);
+  const [previewing, setPreviewing] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   /** 展开的节点：任务 / 空间 / 文件夹。默认全部收起。 */
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -66,6 +71,10 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone }: Pro
   useEffect(() => {
     if (open && account) {
       setCopySessions(false);
+      setAlignAutomations(true);
+      setAlignSessions(false);
+      setAlignFiles(false);
+      setPreviewLines(null);
       setSelected(new Set());
       setExpanded(new Set());
       setError("");
@@ -118,11 +127,23 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone }: Pro
       const res = await api.switchAccount({
         accountId: account.id,
         copySessionIds: copySessions ? [...selected] : undefined,
+        alignAutomations: alignAutomations,
+        alignSessions: alignSessions,
+        alignFiles: alignFiles,
       });
       const nickname = account.nickname || account.email || account.uid || "该账号";
       const parts: string[] = [];
       if (res.sessionCopy?.copied.length) {
         parts.push(`已复制 ${res.sessionCopy.copied.length} 个会话`);
+      }
+      if (res.alignData?.automations) {
+        parts.push(`已对齐 ${res.alignData.automations.updated} 个自动化`);
+      }
+      if (res.alignData?.sessions?.updated) {
+        parts.push(`已对齐 ${res.alignData.sessions.updated} 个会话`);
+      }
+      if (res.alignData?.files?.storage?.copied) {
+        parts.push(`已同步 ${res.alignData.files.storage.copied} 个文件`);
       }
       if (res.backup) parts.push(`备份: ${res.backup}`);
       toast.success(`已切换至「${nickname}」`, {
@@ -135,6 +156,57 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone }: Pro
     } finally {
       setBusy(false);
       setProgress("");
+    }
+  }
+
+  function formatAlignReport(r: AlignDataReport): string[] {
+    if (r.error) return [`对齐出错：${r.error}`];
+    if (r.noop) return ["没有勾选任何对齐项"];
+    const lines: string[] = [];
+    if (r.automations) {
+      lines.push(`自动化归属：${r.automations.updated} 条待对齐`);
+      if (r.automations.outbox) lines.push(`投递队列：${r.automations.outbox} 条`);
+    }
+    if (r.sessions) {
+      lines.push(
+        r.sessions.error
+          ? `会话归属出错：${r.sessions.error}`
+          : `会话归属：${r.sessions.updated} 条待对齐`,
+      );
+    }
+    const f = r.files;
+    if (f) {
+      if (f.settings?.changed) lines.push(`settings.json：${f.settings.changed} 项差异`);
+      else if (f.settings) lines.push("settings.json：已一致");
+      if (f.storage) {
+        lines.push(
+          `storage 文件：待复制 ${f.storage.copied}，跳过 ${f.storage.skipped}，并集 ${f.storage.deferred}`,
+        );
+      }
+      if (f.memory) lines.push(f.memory.changed ? "画像缓存：待对齐" : "画像缓存：已一致");
+      if (f.myFiles) lines.push(`my-files.json：${f.myFiles.files} 份，待更新 ${f.myFiles.changed}`);
+    }
+    lines.push(r.dryRun ? "以上为预览结果，尚未落盘" : "对齐完成（已先备份 db 与 settings）");
+    return lines;
+  }
+
+  async function doPreview() {
+    if (!account) return;
+    setPreviewing(true);
+    setError("");
+    try {
+      const res = await api.switchAccount({
+        accountId: account.id,
+        alignAutomations: alignAutomations,
+        alignSessions: alignSessions,
+        alignFiles: alignFiles,
+        dryRun: true,
+      });
+      setPreviewLines(res.alignData ? formatAlignReport(res.alignData) : ["无对齐数据"]);
+    } catch (e) {
+      setPreviewLines([api.asError(e)]);
+    } finally {
+      setPreviewing(false);
     }
   }
 
@@ -243,6 +315,53 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone }: Pro
               disabled={loadingSessions || sessions.length === 0}
             />
           </div>
+
+          <div className="flex items-center justify-between gap-3 rounded-md border px-3 py-2.5">
+            <div className="min-w-0 flex-1">
+              <div className="text-sm font-medium">自动化跟随切换</div>
+              <div className="text-xs text-muted-foreground">
+                把当前所有未删除自动化的归属改到目标账号，切换后目标账号即可见可管（本地操作，不影响云端）
+              </div>
+            </div>
+            <Switch checked={alignAutomations} onCheckedChange={setAlignAutomations} />
+          </div>
+
+          <div className="flex items-center justify-between gap-3 rounded-md border px-3 py-2.5">
+            <div className="min-w-0 flex-1">
+              <div className="text-sm font-medium">会话归属对齐（全量可见）</div>
+              <div className="text-xs text-muted-foreground">
+                把所有本地会话归属改到目标账号，切换后看到全量对话列表；与上面的复制会话二选一即可
+              </div>
+            </div>
+            <Switch
+              checked={alignSessions}
+              onCheckedChange={(v) => {
+                setAlignSessions(v);
+                if (v) setCopySessions(false);
+              }}
+            />
+          </div>
+
+          <div className="flex items-center justify-between gap-3 rounded-md border px-3 py-2.5">
+            <div className="min-w-0 flex-1">
+              <div className="text-sm font-medium">数据文件一致性同步</div>
+              <div className="text-xs text-muted-foreground">
+                settings 配置、storage 用户数据、画像缓存按最近活跃账号补齐；my-files 取全账号并集（凭据类键不迁移，防串号）
+              </div>
+            </div>
+            <Switch checked={alignFiles} onCheckedChange={setAlignFiles} />
+          </div>
+
+          {previewLines && (
+            <div className="rounded-md border bg-muted/40 px-3 py-2.5">
+              <div className="mb-1 text-xs font-medium text-muted-foreground">对齐预览</div>
+              <ul className="space-y-0.5 text-xs">
+                {previewLines.map((line, i) => (
+                  <li key={i} className="min-w-0 break-all">{line}</li>
+                ))}
+              </ul>
+            </div>
+          )}
 
           {copySessions && (
             <>
@@ -395,6 +514,13 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone }: Pro
         <DialogFooter className="shrink-0">
           <Button variant="outline" onClick={() => onOpenChange(false)} disabled={busy}>
             取消
+          </Button>
+          <Button
+            variant="secondary"
+            onClick={doPreview}
+            disabled={busy || previewing || (!alignAutomations && !alignSessions && !alignFiles)}
+          >
+            {previewing ? "统计中…" : "预览对齐"}
           </Button>
           <Button onClick={doSwitch} disabled={busy || (copySessions && copyCount === 0)}>
             {busy ? "切换中…" : "确认切换"}

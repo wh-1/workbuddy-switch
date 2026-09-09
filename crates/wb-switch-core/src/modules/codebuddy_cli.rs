@@ -392,11 +392,16 @@ fn validate_helper_result(
 
 #[cfg(any(target_os = "macos", test))]
 fn node_path_from_shell_output(stdout: &[u8]) -> Option<PathBuf> {
-    String::from_utf8_lossy(stdout).lines().rev().find_map(|line| {
-        let path = PathBuf::from(line.trim());
-        (path.is_absolute() && path.file_name().is_some_and(|name| name == "node"))
-            .then_some(path)
-    })
+    String::from_utf8_lossy(stdout)
+        .lines()
+        .rev()
+        .find_map(|line| {
+            let trimmed = line.trim();
+            let path = PathBuf::from(trimmed);
+            // Windows 测试环境里 `/Users/...` 不算 is_absolute()，Unix 根路径也接受
+            let absolute = path.is_absolute() || trimmed.starts_with('/');
+            (absolute && path.file_name().is_some_and(|name| name == "node")).then_some(path)
+        })
 }
 
 #[cfg(target_os = "macos")]

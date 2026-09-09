@@ -111,6 +111,8 @@ pub fn run() {
             commands::preview_import_accounts,
             commands::import_accounts,
             commands::switch_account,
+            commands::align_automations,
+            commands::align_data,
             commands::list_sessions,
             commands::copy_sessions,
             commands::open_permission_settings,

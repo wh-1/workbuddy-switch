@@ -95,11 +95,36 @@ export interface SwitchResult {
   ok: boolean;
   account: string;
   backup: string | null;
+  dryRun?: boolean;
   sessionCopy?: {
     sourceUid: string;
     targetUid: string;
     copied: CopyResult[];
     errors?: { id: string; error: string }[];
+  };
+  automationAlign?: {
+    targetUid: string;
+    automationsUpdated: number;
+    outboxUpdated: number;
+    backup: string | null;
+  };
+  alignData?: AlignDataReport;
+}
+
+export interface AlignDataReport {
+  targetUid: string;
+  dryRun: boolean;
+  noop?: boolean;
+  error?: string;
+  backup?: { db: string | null; settings: string | null };
+  automations?: { updated: number; outbox: number };
+  sessions?: { updated: number; triggerRemoved: boolean; error?: string };
+  files?: {
+    sourceUid?: string | null;
+    settings?: { changed: number; keys?: string[]; skipped?: boolean; error?: string };
+    storage?: { copied: number; skipped: number; deferred: number; samples?: string[] };
+    memory?: { changed: boolean; bytes?: number; skipped?: boolean };
+    myFiles?: { files: number; changed: number; keys: number };
   };
 }
 

@@ -17,7 +17,7 @@ use rust_embed::RustEmbed;
 use serde_json::{json, Value};
 
 use wb_switch_core::modules::{
-    account, auth_file, checkin, codebuddy_cli, codebuddy_cn_ide, config, credit_usage, credits, export_import,
+    account, align, auth_file, checkin, codebuddy_cli, codebuddy_cn_ide, config, credit_usage, credits, export_import,
     oauth, process, refresh, rotate, session, switch, token_stats, update,
 };
 
@@ -81,6 +81,8 @@ pub fn router() -> Router {
         .route("/api/switch/progress", get(api_switch_progress))
         .route("/api/sessions", get(api_sessions))
         .route("/api/sessions/copy", post(api_copy_sessions))
+        .route("/api/automations/align", post(api_align_automations))
+        .route("/api/align/data", post(api_align_data))
         .route("/api/checkin/status", get(api_checkin_status))
         .route("/api/credits", post(api_credits))
         .route("/api/credits/stats", get(api_credit_statistics))
@@ -321,23 +323,8 @@ async fn api_switch(Json(body): Json<Value>) -> Response {
     if account_id.trim().is_empty() {
         return json_err("缺少 accountId".to_string(), StatusCode::BAD_REQUEST);
     }
-    let restart = body
-        .get("restart")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
-    let share_sessions = body
-        .get("shareSessions")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    let copy_ids: Vec<String> = body
-        .get("copySessionIds")
-        .and_then(|v| v.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|x| x.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
+    let mut opts: switch::SwitchOptions = serde_json::from_value(body).unwrap_or_default();
+    opts.restart = true;
 
     {
         let mut running = SWITCH_RUNNING.lock().unwrap();
@@ -353,13 +340,7 @@ async fn api_switch(Json(body): Json<Value>) -> Response {
     });
 
     let result = tokio::task::spawn_blocking(move || {
-        switch::switch_account(
-            Some(&progress),
-            &account_id,
-            restart,
-            share_sessions,
-            &copy_ids,
-        )
+        switch::switch_account(Some(&progress), &account_id, &opts)
     })
     .await;
 
@@ -417,6 +398,67 @@ async fn api_copy_sessions(Json(body): Json<Value>) -> Response {
         "targetUid": target.get("uid"),
         "copied": result,
     }))
+}
+
+/// POST /api/automations/align —— 自动化归属对齐（不切号）。需先完全退出 WorkBuddy。
+async fn api_align_automations(Json(body): Json<Value>) -> Response {
+    let account_id = body
+        .get("accountId")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if account_id.trim().is_empty() {
+        return json_err("缺少 accountId".to_string(), StatusCode::BAD_REQUEST);
+    }
+    let Some(target) = account::find_account(&account_id) else {
+        return json_err("账号不存在".to_string(), StatusCode::BAD_REQUEST);
+    };
+    let uid = align::account_uid(&target);
+    if uid.is_empty() {
+        return json_err("该账号缺少 uid，无法对齐".to_string(), StatusCode::BAD_REQUEST);
+    }
+    match align::align_automations_owner(&uid) {
+        Some(v) => json_ok(v),
+        None => json_err("workbuddy.db 不存在".to_string(), StatusCode::BAD_REQUEST),
+    }
+}
+
+/// POST /api/align/data —— 多账号数据全量对齐（L1/L3/L4/L5），dryRun=true 只预览。
+async fn api_align_data(Json(body): Json<Value>) -> Response {
+    let account_id = body
+        .get("accountId")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if account_id.trim().is_empty() {
+        return json_err("缺少 accountId".to_string(), StatusCode::BAD_REQUEST);
+    }
+    let Some(target) = account::find_account(&account_id) else {
+        return json_err("账号不存在".to_string(), StatusCode::BAD_REQUEST);
+    };
+    let uid = align::account_uid(&target);
+    if uid.is_empty() {
+        return json_err("该账号缺少 uid，无法对齐".to_string(), StatusCode::BAD_REQUEST);
+    }
+    let opts = align::AlignOptions {
+        align_automations: body
+            .get("alignAutomations")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true),
+        align_sessions: body
+            .get("alignSessions")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        align_files: body
+            .get("alignFiles")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        dry_run: body
+            .get("dryRun")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+    };
+    json_ok(align::align_data(&uid, None, &opts))
 }
 
 // ---------------------------------------------------------------------------
