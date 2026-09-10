@@ -26,3 +26,11 @@
 - 结果：3 账号（H / Elaine / Harvey）全部识别并补齐在册；159 测试全绿 + tsc 绿。
 - 顺带修复：`vite.config.ts` 双栈监听（`host: true`）根治 Tauri dev 白壳。
 - 环境发现：AI 沙箱长驻进程读不了宿主 auth 目录（os error 5），放行前台命令可读；正常使用无影响。
+
+## 2026-09-10 合并上游 v0.1.36（含 .git 二次损坏恢复）
+
+- 上游新增 6 提交（v0.1.34 → v0.1.36）：`travel` 派猫猫旅行自动派发/领取（`travel.rs` +1236 行）、Token 统计新增 **CodeBuddy IDE 来源**（读 CodeBuddyExtension history index 的 `requests.usage`，不扫消息正文）、版本号 0.1.36。
+- 合并：main ff 到 `bbb0d3c`；dev 合并产生 3 处冲突（`crates/wb-switch-server/src/api.rs`、`src-tauri/src/commands.rs`、`src/lib/api.ts`），均为模块/命令注册表，按「两边都保留」解决（本地 `align`/`discover` + 上游 `travel`）。
+- **二次事故**：合并再次被 SIGTERM 强杀 → `.git/refs/` 消失、loose objects 归零、旧 pack（27MB 全史）`.pack` 被删、工作区 59 文件消失。恢复手段与损失范围见 `HANDOFF.md`「事故」段；实际损失仅为 5 个本地提交的历史粒度，内容零损失。
+- 防护升级：仓库 `gc.auto=0` + `gc.autoDetach=false`；**约定大仓库 git 写操作一律后台或超长超时执行，禁止在 2 分钟前台超时窗口内跑 merge/checkout**。
+- 结果：dev = `a07eac0`，176 测试全绿 + tsc 绿 + cargo check 绿；dev/main 均已 push 到 origin。
