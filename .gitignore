@@ -45,3 +45,7 @@ npm/platform/*/bin/
 .codex/
 .grok/
 /.workbuddy/
+
+# 环境变量（真实配置不入库，规范第 10.1 章）
+.env
+.env.local
