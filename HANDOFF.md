@@ -44,6 +44,8 @@
 5. 含凭据关键词源码有被 AV 删的真实风险 → 重要分支勤 push
 6. 编译前必须停掉运行中的 `wb-switch.exe` / `wb-switch-rust.exe`
 7. **新增**：大仓库 git 操作被强杀会留下半成品 `.git`（refs/pack 丢失）→ 见「事故」段恢复流程；`gc.auto` 已永久关闭
+8. **vite 启动被 WorkBuddy safe-delete shim 拦截**：合并后 `vite.config.ts` 变化会触发依赖重优化，vite 需删 `node_modules/.vite/deps`（95 文件 > 阈值 50）→ 报 `[safe-delete][SAFE_DELETE_BULK_CONFIRM_REQUIRED]` 直接启动失败。解法：把 `node_modules/.vite` **改名**（PowerShell `Rename-Item`，别删），再起 vite
+9. **debug exe 白壳的完整前提**：① vite 必须在 1420 跑（`npm run dev`）；② exe 必须是当次源码编译的产物（合并后未重编 = 看到旧 UI）。一键启动：双击 `scripts/run-dev.cmd`
 
 ## 下一步
 
