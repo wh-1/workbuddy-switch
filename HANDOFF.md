@@ -16,6 +16,7 @@
   3. 本地既有：账号发现、对齐功能（L1-L5）、vite 双栈修复
   4. 版本号随上游升到 **0.1.36**
 - 构建形态不变：debug exe + vite；**尚无 release 包**
+- 2026-09-10 晚（repo-discipline 会话顺手）：HANDOFF 备份路径更新至 `D:\w-dev\_archive\rescue-20260910-full`（归档区集中，原 `wb\_rescue-20260910-full` 已迁走）；另双 rescue 快照改名去下划线 + 补基线文件。
 
 ## 事故（2026-09-10 14:34，已完整恢复）
 
