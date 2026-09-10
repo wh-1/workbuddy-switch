@@ -271,47 +271,130 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// 云端继承：WorkBuddy 把明暗/皮肤选择按账号存云端（/portal/user-asset/appearance），
+// 切号启动后由外观运行时拉回——本地注入只能保证启动瞬间，云端改掉才能永久跟随。
+// 接口规格 2026-09-11 从 app.asar 渲染层逆向 + 本机实测（Bearer access_token）。
+// ---------------------------------------------------------------------------
+
+const APPEARANCE_GET_URL: &str = "https://www.workbuddy.cn/portal/user-asset/appearance/get";
+const APPEARANCE_SET_URL: &str = "https://www.workbuddy.cn/portal/user-asset/appearance/set";
+
+fn cloud_http() -> reqwest::blocking::Client {
+    reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        // 本机 WARP 代理会碍事，workbuddy.cn 直连可达
+        .no_proxy()
+        .build()
+        .unwrap_or_else(|_| reqwest::blocking::Client::new())
+}
+
+/// 读账号云端 theme 选择（resource_key，如 "light"/"dark"/皮肤 id）。
+fn fetch_cloud_theme(token: &str) -> Option<String> {
+    let resp: Value = cloud_http()
+        .get(APPEARANCE_GET_URL)
+        .bearer_auth(token)
+        .send()
+        .ok()?
+        .json()
+        .ok()?;
+    if resp.get("code").and_then(|c| c.as_i64()) != Some(0) {
+        return None;
+    }
+    let items = resp.get("data")?.get("items")?.as_array()?;
+    items
+        .iter()
+        .filter_map(|i| i.as_object())
+        .find(|o| o.get("kind").and_then(|k| k.as_str()) == Some("theme"))
+        .and_then(|o| o.get("resource_key"))
+        .and_then(|k| k.as_str())
+        .map(|s| s.to_string())
+}
+
+/// 写账号云端 theme 选择。
+fn push_cloud_theme(token: &str, resource_key: &str) -> Result<(), String> {
+    let resp: Value = cloud_http()
+        .post(APPEARANCE_SET_URL)
+        .bearer_auth(token)
+        .json(&json!({ "kind": "theme", "resource_key": resource_key }))
+        .send()
+        .map_err(|e| e.to_string())?
+        .json()
+        .map_err(|e| e.to_string())?;
+    match resp.get("code").and_then(|c| c.as_i64()) {
+        Some(0) => Ok(()),
+        _ => Err(format!("set 响应异常: {resp}")),
+    }
+}
+
+/// 云端继承：把 source 账号的 theme 选择写到 target 账号云端。
+/// 任一步失败返回 Err（不阻断切号），成功返回变更描述。
+fn inherit_cloud_theme(source_token: &str, target_token: &str) -> Result<Value, String> {
+    let source_theme = fetch_cloud_theme(source_token)
+        .ok_or_else(|| "读取 source 云端主题失败".to_string())?;
+    let target_theme = fetch_cloud_theme(target_token);
+    if target_theme.as_deref() == Some(source_theme.as_str()) {
+        return Ok(json!({ "changed": false, "theme": source_theme }));
+    }
+    push_cloud_theme(target_token, &source_theme)?;
+    Ok(json!({ "changed": true, "theme": source_theme, "previous": target_theme }))
+}
+
+// ---------------------------------------------------------------------------
 // 对外入口
 // ---------------------------------------------------------------------------
 
-/// 切号时同步主题：**目标账号继承上一个账号（被切走账号）的主题**。
+/// 切号时同步主题，两层：
 ///
-/// 语义（主人定）：主题跟人走——H 浅切到谁，谁就是浅；改深再切，全是深。
-/// 实现：读当前主题（= 上个账号留下的状态）→ 以最新 sequence 追加同值记录
-/// （明确声明继承，保证启动读到该值）→ 更新目标账号的追踪备份。
+/// ① 本地继承：当前主题（= 上个账号留下的状态）以最新 sequence 追加，
+///    保证 app 重启瞬间显示的就是继承值；
+/// ② 云端继承（彻底解）：WorkBuddy 把明暗选择按账号存云端，切号启动后
+///    外观运行时会拉回 target 自己的偏好（实测几秒内覆盖本地）。
+///    用 target 的 token 调 appearance/set，把 target 云端选择改成 source
+///    的值，拉回的也就是继承值——永久跟随。
 ///
-/// 已知边界：WorkBuddy 启动后会把**云端账号偏好**回写本地（切号 .log 里
-/// dark/light 交替实锤）。若回写发生，继承值会被拉回——本地无法阻止云端
-/// 下载，只能在启动瞬间保证继承生效。是否被拉回以实测为准。
-///
-/// 必须在 WorkBuddy 完全关闭后、写 auth/重启前调用。任何失败都不阻断切号。
-pub fn sync_theme_for_switch(source_uid: Option<&str>, target_uid: &str) -> Value {
+/// 必须在 WorkBuddy 完全关闭后、写 auth/重启前调用。两层互不依赖，
+/// 任何一层失败都不阻断切号。
+pub fn sync_theme_for_switch(
+    source_uid: Option<&str>,
+    target_uid: &str,
+    source_token: Option<&str>,
+    target_token: Option<&str>,
+) -> Value {
     let dir = leveldb_dir();
     if !dir.is_dir() || target_uid.is_empty() {
-        return json!({ "inherited": false, "skipped": true });
+        return json!({ "inherited": false, "cloud": null, "skipped": true });
     }
-    let Some(current) = scan_current_theme(&dir) else {
-        return json!({ "inherited": false, "reason": "leveldb .log 中未读到当前主题" });
-    };
 
-    // 继承：以最新 sequence 重申当前主题（值不变，声明意图 + 抬高 sequence）
-    // 写前整目录备份（append-only 本已安全，备份兜底以防万一）
-    let dst = backup_dir().join("localstorage").join(utc_iso());
-    if let Err(e) = copy_dir_recursive(&dir, &dst) {
-        return json!({ "inherited": false, "theme": current, "error": format!("Local Storage 备份失败: {e}") });
-    }
-    let appended = match append_theme_record(&dir, now_ms() as u64, &current) {
-        Ok(()) => true,
-        Err(e) => {
-            return json!({ "inherited": false, "theme": current, "error": e });
+    // ① 本地继承
+    let local = scan_current_theme(&dir)
+        .map(|current| {
+            let dst = backup_dir().join("localstorage").join(utc_iso());
+            if let Err(e) = copy_dir_recursive(&dir, &dst) {
+                return json!({ "inherited": false, "theme": current, "error": format!("Local Storage 备份失败: {e}") });
+            }
+            match append_theme_record(&dir, now_ms() as u64, &current) {
+                Ok(()) => {
+                    let _ = backup_theme_for(target_uid, Some(&current));
+                    json!({ "inherited": true, "theme": current })
+                }
+                Err(e) => json!({ "inherited": false, "theme": current, "error": e }),
+            }
+        })
+        .unwrap_or_else(|| json!({ "inherited": false, "reason": "leveldb .log 中未读到当前主题" }));
+
+    // ② 云端继承（source/target token 齐备才做）
+    let cloud = match (source_token, target_token) {
+        (Some(src), Some(tgt)) if !src.is_empty() && !tgt.is_empty() => {
+            match inherit_cloud_theme(src, tgt) {
+                Ok(v) => v,
+                Err(e) => json!({ "changed": false, "error": e }),
+            }
         }
+        _ => json!({ "changed": false, "reason": "缺少 source/target token" }),
     };
 
-    // 追踪备份：目标账号继承后的主题快照（供追溯；不再用于"恢复各自主题"）
-    let _ = backup_theme_for(target_uid, Some(&current));
-    let _ = source_uid; // 继承语义下源身份仅用于日志，不参与取值
-
-    json!({ "inherited": appended, "theme": current })
+    let _ = source_uid; // 继承语义下源身份经 token 体现，uid 仅留作日志
+    json!({ "local": local, "cloud": cloud })
 }
 
 // ---------------------------------------------------------------------------

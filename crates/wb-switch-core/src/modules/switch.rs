@@ -131,12 +131,24 @@ pub fn switch_account(
                 source_uid.as_deref(),
                 &align_opts,
             ));
-            // 主题跟随账号（L6）：备份被切走账号的主题 + 预写目标账号主题，
-            // 重启即为目标主题，不等云端异步回写。失败不阻断切号。
+            // 主题跟随账号（L6）：本地继承（leveldb 注入，启动瞬间生效）
+            // + 云端继承（把 target 的云端外观选择改成 source 的值，根治回跳）。
+            // 失败不阻断切号。
             progress("正在同步目标账号界面主题…");
+            let source_acc = session::current_user_uid().and_then(|uid| {
+                account::load_accounts()
+                    .into_iter()
+                    .find(|a| align::account_uid(a) == uid)
+            });
+            let source_token = source_acc
+                .as_ref()
+                .and_then(|a| account::get_str(a, "access_token"));
+            let target_token = account::get_str(&acc, "access_token");
             theme_report = Some(crate::modules::ui_theme::sync_theme_for_switch(
                 source_uid.as_deref(),
                 &target_uid,
+                source_token.as_deref(),
+                target_token.as_deref(),
             ));
         }
         if opts.share_sessions {
