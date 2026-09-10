@@ -33,4 +33,15 @@
 - 合并：main ff 到 `bbb0d3c`；dev 合并产生 3 处冲突（`crates/wb-switch-server/src/api.rs`、`src-tauri/src/commands.rs`、`src/lib/api.ts`），均为模块/命令注册表，按「两边都保留」解决（本地 `align`/`discover` + 上游 `travel`）。
 - **二次事故**：合并再次被 SIGTERM 强杀 → `.git/refs/` 消失、loose objects 归零、旧 pack（27MB 全史）`.pack` 被删、工作区 59 文件消失。恢复手段与损失范围见 `HANDOFF.md`「事故」段；实际损失仅为 5 个本地提交的历史粒度，内容零损失。
 - 防护升级：仓库 `gc.auto=0` + `gc.autoDetach=false`；**约定大仓库 git 写操作一律后台或超长超时执行，禁止在 2 分钟前台超时窗口内跑 merge/checkout**。
-- 结果：dev = `a07eac0`，176 测试全绿 + tsc 绿 + cargo check 绿；dev/main 均已 push 到 origin。
+- 结果：dev 合并完成，176 测试全绿 + tsc 绿 + cargo check 绿；dev/main 均已 push 到 origin。
+
+## 2026-09-10 收尾段（统计实证 / 替代分析 / 上游 issue #30）
+
+- **Token/积分统计机制 + 删对话实证**：Token 统计纯派生（扫 `projects/**/*.jsonl` 排除 `subagents/`，无账本）；积分统计靠 `credit_usage_snapshots.json` 相邻快照下降差 + 官方账单接口。实证：本机 20 个已删会话（`deleted_at` 非空）JSONL 全部仍在 → 今日 174M token 中含已删会话 6M 仍计入 → **删对话（软删）不掉 Token 统计**；WorkBuddy 删对话只清 `session_usage` 表（本项目不读）。
+- **替代关系确认**：git diff + 双子代理比对 `wb_multi_sync`，确认 dev 改动**完全替代**且为超集（L1/L3/L4/L5 全覆盖 + token/积分/签到/旅行等增量）；wb_multi_sync 可退役（保留仓库归档）。
+- **改动完整性**：全量 grep `TODO|FIXME|unimplemented!` 零真缺口；前端 45 命令 ↔ 后端 41 路由 ↔ Tauri 注册全对齐；硬指标 176 绿 / tsc 绿 / cargo check 绿。
+- **回贡上游评估**：推荐推 ①vite 双栈修复 ②账号发现 ③数据对齐（由小到大建立信任）；不推 AGENTS/HANDOFF/memory/版本号。
+- **vite 白壳根因（Windows 实测）**：上游 `host: host || false` → 只绑 `[::1]:1420`；Windows `localhost` 优先 IPv6 → WebView2（IPv4）连不上 → 白壳。本地 `host: host || true` 双栈修复。仅影响 Windows dev 环境，release 包内嵌 dist 不受影响。
+- **issue #30 已提交 + 严谨核实**：https://github.com/changexbc/workbuddy-switch/issues/30（作者 wh-1，状态 open）。决策：只开 issue 不建 PR。三项对照实验（false→仅::1 / true→0.0.0.0+[::] / 127.0.0.1→127.0.0.1）证实根因；全网检索命中 Tauri #9509、Vite #16522、官方模板即 `host: host || false`，方案有社区共识。PATCH 增强正文至 1873 字符。
+- **新建两个跨项目 skill**：`git-corruption-rescue`（git 仓库损坏抢救流程）、`github-api-without-gh`（无 gh 时 PAT 直连 GitHub REST API）。
+- 收尾时 dev = `6fc8ca5`（已含 HANDOFF 路径迁移至归档区、接入 w-dev 项目守卫），工作区干净；176 测试 + tsc 复核全绿。
