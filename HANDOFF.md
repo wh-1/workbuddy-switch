@@ -23,7 +23,7 @@
 - **损坏范围**：`.git/refs/` 整个目录消失；loose objects 归零；旧 pack（27MB，含 0.1.0~0.1.34 全史）只剩 `.idx`、`.pack` 被删；工作区 59 个文件消失。
 - **恢复手段**：① 从 `C:\Users\WH\AppData\Local\Temp\wbs-fresh\.git\objects\pack\` 找回同名 27MB pack 完整副本；② `git fetch origin dev` 补回 `e15b9fb` / `b12908e`；③ 从 index 恢复 59 个缺失文件；④ `rm .git/index` + `git reset` + `git add -A` 重建索引，按原意图重建 4 个提交。
 - **损失**：原 5 个本地提交（`00bdb43` `93481a9` `17e4d5f` `872c9de` `fe20304`）的**历史粒度**丢失，**代码/文档内容零损失**。
-- **防护（重要）**：仓库已设 `gc.auto=0` + `gc.autoDetach=false`，**勿改回**；工作区备份 `D:\w-dev\wb\_rescue-20260910-full`；`C:\Users\WH\AppData\Local\Temp\wbs-fresh` 裸对象库**勿删**（救命备份）。
+- **防护（重要）**：仓库已设 `gc.auto=0` + `gc.autoDetach=false`，**勿改回**；工作区备份 `D:\w-dev\_archive\rescue-20260910-full`（2026-09-10 归档区集中）；`C:\Users\WH\AppData\Local\Temp\wbs-fresh` 裸对象库**勿删**（救命备份）。
 
 ## 决策（为什么这样做）
 
