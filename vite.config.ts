@@ -28,7 +28,9 @@ export default defineConfig(async () => ({
   server: {
     port: 1420,
     strictPort: true,
-    host: host || false,
+    // 本机坑：默认 localhost 只绑 IPv6 ::1，Tauri WebView2 走 IPv4 会白壳。
+    // 显式监听全部接口（含 127.0.0.1），devUrl http://localhost:1420 双栈可达。
+    host: host || true,
     hmr: host
       ? {
           protocol: "ws",
