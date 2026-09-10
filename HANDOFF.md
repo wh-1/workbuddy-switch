@@ -1,19 +1,20 @@
 # HANDOFF — workbuddy-switch
 
-> 更新：2026-09-10 晚 · 分支 dev · 工作区干净
+> 更新：2026-09-10 深夜 · 分支 dev · 工作区干净
 > 上阶段：合并上游 v0.1.36（travel 派猫猫旅行 + CodeBuddy IDE 用量统计）+ 向上游提交 issue #30
-> 本晚新增：修复切号对齐勾选失效（Tauri/HTTP 双通道参数断层），dev = `272530b` 已推
-> ⚠️ 本阶段发生 `.git` 损坏事故并已完整恢复，见「事故」段
+> 本晚两大项，均已 GUI 实测通过：
+> ① 修复切号对齐勾选失效（Tauri/HTTP 双通道参数断层，`272530b`）
+> ② 切号主题跟随账号三连演进（`9f802cb`→`e30a6d7`→`b854237`），最终方案 = 本地 leveldb 注入 + 云端外观继承，主人三轮切换实测通过
+> ⚠️ 本日早些时候发生 `.git` 损坏事故并已完整恢复，见「事故」段
 
 ## 进度（现在在哪）
 
-- **dev = `9f802cb`**（切号主题跟随账号 L6；前一节点 `272530b` 修对齐勾选参数断层）
-- 验证：`cargo test -p wb-switch-core` **182 全绿**、`npx tsc --noEmit` 绿、debug exe 已重编
-- **主题跟随（9f802cb）**：主题存 Electron Local Storage（leveldb 键 `agent-ui-theme`，云端异步回写导致切号重启瞬间可能闪默认主题）。切号流程在 App 关闭后备份当前账号主题到 `~/.wb-switch/ui_prefs/`、把目标账号主题 append 进最新 .log（手写 LevelDB log record + CRC32C，append-only、写坏仅被丢弃）。某账号首次切走才生成备份，此前由云端兜底。**待 GUI 实测**：切号重启瞬间主题应直接到位
-- **bug 修复（272530b）**：GUI 切号弹窗勾选项（会话归属/文件对齐/dryRun 预览）被静默丢弃——Tauri 命令嵌套签名 vs 前端扁平 invoke + SwitchOptions 缺 serde camelCase。会话 0 同步的根因即此；automations「同步了」是 WorkBuddy 本体云端同步的巧合。待 GUI 复测：勾「会话归属对齐」切号验证
+- **dev = `b854237`**（主题云端继承；当晚链条 `272530b` 对齐修复 → `9f802cb` 主题 L6 → `d42b4a6` docs → `e30a6d7` 继承语义 → `b854237` 云端继承）
+- 验证（收尾复核）：`cargo test -p wb-switch-core` **182 全绿**、`npx tsc --noEmit` 绿、debug exe 已重编、**GUI 三轮切号实测通过**
+- **主题跟随账号（已完结）**：WorkBuddy 主题/皮肤按账号存云端（`/portal/user-asset/appearance/get|set`，Bearer access_token，kind=theme，resource_key=light/dark/皮肤ID），启动后异步拉回覆盖本地——这就是"几秒变回"的根因。切号流程现已双管齐下：① 本地注入——切号重启前把当前主题 append 进 Local Storage 最新 .log（手写 LevelDB log record + WriteBatch + CRC32C，写坏仅被丢弃，原数据无损），保证启动瞬间正确；② **云端继承**——用 target 的 token 把 target 的云端外观选择改成 source 的值，保证启动后拉到的就是继承值，**永久跟随**。两者均失败不阻断切号。皮肤（在线资源包）继承生效，仅保留几秒加载闪烁（官方 issue #93057 同类问题，无法本地根治）
+- **对齐勾选 bug（已修复 + 实测通过）**：GUI 切号弹窗勾选项被静默丢弃——Tauri 命令嵌套 `Option<SwitchOptions>` vs 前端扁平 invoke + `SwitchOptions` 缺 serde camelCase，双通道同款。修复后主人实测会话归属对齐正常同步
 - **main = `bbb0d3c`** = 上游 changexbc/workbuddy-switch v0.1.36
-- **origin 已双备份**：dev = `6fc8ca5` / main = `bbb0d3c`
-- 验证：`cargo test -p wb-switch-core` **176 全绿**、`npx tsc --noEmit` 绿、`cargo check` 绿（收尾复核）
+- **origin 已双备份**（dev/main 均 push 到 origin/dev、origin/main）
 - 本阶段产出：
   1. 合并上游 v0.1.35 / v0.1.36，3 处冲突已解（`api.rs` / `commands.rs` / `lib/api.ts` 的模块与命令注册表）
   2. 上游新能力：`travel` 派猫猫旅行（`travel.rs` +1236 行）、Token 统计新增 **CodeBuddy IDE 来源**
@@ -58,9 +59,8 @@
 ## 下一步
 
 1. **GUI 实测上游新功能**：travel 派猫猫旅行页面、Token 统计页新增的 CodeBuddy IDE 来源
-2. **GUI 实测账号发现**：双击 `target/debug/wb-switch-rust.exe`（想复现提示条可先删一条 `~/.wb-switch/accounts.json`）
-3. **真·切号对齐实测**（GUI）：选账号 → 切号弹窗勾「自动化跟随切换」→ 点「对齐预览」→ 确认切换（**会重启 WorkBuddy 本体**）
-4. **可选出正式包**：`npm run tauri build`（内嵌 dist，不走 devUrl，无白壳；首次 30-60 分钟）
-5. 官方再出新版：`git fetch official` → main ff 合并 → dev 合并
-6. 备选：wb_multi_sync 退役（L4/L5 已内置）
-7. issue #30 跟进：等维护者回应，积极则提账号发现 / 数据对齐 PR（依 `改动回贡上游评估` 顺序 ①vite→②账号发现→③数据对齐）
+2. **可选出正式包**：`npm run tauri build`（内嵌 dist，不走 devUrl，无白壳；首次 30-60 分钟）
+3. 官方再出新版：`git fetch official` → main ff 合并 → dev 合并
+4. 备选：wb_multi_sync 退役（L4/L5 已内置）
+5. issue #30 跟进：等维护者回应，积极则提账号发现 / 数据对齐 PR（依 `改动回贡上游评估` 顺序 ①vite→②账号发现→③数据对齐）
+6. 远期备选：主题皮肤加载闪烁的根治只能依赖官方（issue #93057 同类问题）；外观 API 若官方变动需同步调整 `ui_theme.rs`
