@@ -45,3 +45,16 @@
 - **issue #30 已提交 + 严谨核实**：https://github.com/changexbc/workbuddy-switch/issues/30（作者 wh-1，状态 open）。决策：只开 issue 不建 PR。三项对照实验（false→仅::1 / true→0.0.0.0+[::] / 127.0.0.1→127.0.0.1）证实根因；全网检索命中 Tauri #9509、Vite #16522、官方模板即 `host: host || false`，方案有社区共识。PATCH 增强正文至 1873 字符。
 - **新建两个跨项目 skill**：`git-corruption-rescue`（git 仓库损坏抢救流程）、`github-api-without-gh`（无 gh 时 PAT 直连 GitHub REST API）。
 - 收尾时 dev = `6fc8ca5`（已含 HANDOFF 路径迁移至归档区、接入 w-dev 项目守卫），工作区干净；176 测试 + tsc 复核全绿。
+
+## 2026-09-11 按对话统计工具（Token / 命中率 / 积分）
+
+- **起因排查**：主人问「已是 5.5.4 为何仍提示更新」→ 证实服务端确有 **5.5.6.38337834**，更新包已下载到 `%TEMP%\workbuddy-update-x64\`，日志只有 `ready` 无 install 事件 → **下载完成但未安装**（`WorkBuddy.exe` mtime 仍是 5.5.4 安装时间）。顺带厘清版本判定：真实版本只认 `resources/install-manifest.json` 的 `appVersion`；安装目录 `version` 文件是 Electron 内核版本，`vendor/sandbox/<x>/` 是 sandbox 组件版本。
+- **认知澄清（非代码改动）**：`resources/app.asar` 是 Electron **归档格式非加密**（296MB，头部明文 JSON 索引）→ 「可读」≠「开源」，WorkBuddy 仍为闭源商业软件，保护靠 License。主人提出「单主账号使用其他账号积分」经论证**不可实现**（积分记账与 token 身份强绑定，服务端唯一可审计方式），已说明并劝退。
+- **口径纠正（关键）**：初版诊断脚本按**账号**拆分消耗，主人指出方向错误 —— 应**按对话**统计，且「项目都算好了」。改为完全复用项目实现。
+- **新增 `crates/wb-switch-core/examples/dump_stats.rs`**：诊断用 example，直接调 `token_stats::get_statistics()`，支持 `[days]` / `--sessions` / `--json <path>`。**教训：禁止用 Python 复刻统计口径** —— 复刻版算出 8,530 条，项目实际 8,554 条，偏差数百条且难定位；直调项目实现后口径与产品页一致。
+- **统计口径固化为三条**（`token_stats.rs`）：① `total = input + output + cacheWrite`（input 已含 cacheRead，不重复加）；② 命中率 `= cacheRead / input`；③ 用量取值优先级 `message.usage` > `providerData.usage` > 顶层 `usage`，且必须有 input 字段存在才算有效记录（`rawUsage` 仅兜底 cacheWrite）。**一个 JSONL 文件 = 一个对话**。
+- **积分口径修正**：`workbuddy.db` 的 `session_usage` 表**天然按会话存储**（每行 = 一个会话，`session_id` 与 JSONL 文件名实测 **42/42 完全对应**），`credit_json = {traceId: 积分}` 求和即该对话积分。**推翻上一版"需 traceId join JSONL"的认知** —— 直接查表即可。
+- **新增 `scripts/analysis/session_cost.py`**：按对话输出 Token / 命中率 / 积分三指标（积分跨行 traceId 取最大值防重复累加）。配套 `scripts/analysis/credit_diagnose.py` 降为辅助（含积分时间分布/模型/项目维度）。
+- **实测（近 30 天）**：58 个对话 · Total 1.70B · 调用 8,563 次 · 命中率 96.0% · 积分 1,616.23（仅 13 个对话有记账）。全量：71 对话 · 1.81B · 9,695 次 · 95.9% · 2,592.08（20 个对话有记账）。**最烧对话**：daily_stock_analysis「对比方案设计」214.65M / 97.0%（积分 0，走免费额度）。
+- **结论**：「积分不够」非当前瓶颈 —— 免费/套餐内额度不产生积分记账，近 30 天 87% 请求积分为 0 属正常。
+
