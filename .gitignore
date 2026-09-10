@@ -23,6 +23,9 @@ npm/bin/wb-switch-*
 accounts.json
 backups/
 
+# 本地诊断产物（可由 scripts/analysis 重新生成）
+reports/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
