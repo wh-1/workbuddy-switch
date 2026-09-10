@@ -19,7 +19,11 @@ use crate::modules::session;
 pub type ProgressFn = Box<dyn Fn(&str) + Send + Sync>;
 
 /// 切换选项。
+///
+/// serde 必须用 camelCase：HTTP api（api_switch）直接把前端扁平 JSON 反序列化成
+/// 本结构，字段名对不上会被当未知字段忽略、静默落回 default（勾选全部失效）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
 pub struct SwitchOptions {
     #[serde(default = "default_true")]
     pub restart: bool,
@@ -155,4 +159,32 @@ pub fn switch_account(
         result["alignData"] = a;
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 回归：HTTP api 直接把前端扁平 camelCase JSON 反序列化成本结构。
+    /// 曾因缺少 rename_all=camelCase 导致勾选全部被忽略、静默落回 default。
+    #[test]
+    fn switch_options_deserializes_camel_case_body() {
+        let opts: SwitchOptions =
+            serde_json::from_value(json!({
+                "accountId": "a-1",
+                "alignAutomations": false,
+                "alignSessions": true,
+                "alignFiles": true,
+                "dryRun": true
+            }))
+            .expect("camelCase body 应可反序列化");
+        assert!(opts.align_sessions);
+        assert!(opts.align_files);
+        assert!(opts.dry_run);
+        assert!(!opts.align_automations);
+        // snake_case 旧口径不再被接受（字段忽略后落 default）
+        let legacy: SwitchOptions =
+            serde_json::from_value(json!({ "align_sessions": true })).unwrap();
+        assert!(!legacy.align_sessions);
+    }
 }
