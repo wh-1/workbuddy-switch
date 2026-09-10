@@ -17,8 +17,8 @@ use rust_embed::RustEmbed;
 use serde_json::{json, Value};
 
 use wb_switch_core::modules::{
-    account, align, auth_file, checkin, codebuddy_cli, codebuddy_cn_ide, config, credit_usage, credits, export_import,
-    oauth, process, refresh, rotate, session, switch, token_stats, update,
+    account, align, auth_file, checkin, codebuddy_cli, codebuddy_cn_ide, config, credit_usage, credits, discover,
+    export_import, oauth, process, refresh, rotate, session, switch, token_stats, update,
 };
 
 /// WorkBuddy 运行状态缓存：Windows 上检测要跑 tasklist（慢），缓存几秒避免
@@ -57,6 +57,8 @@ pub fn router() -> Router {
     Router::new()
         .route("/api/status", get(api_status))
         .route("/api/accounts", get(api_accounts))
+        .route("/api/accounts/discover", get(api_discover_accounts))
+        .route("/api/accounts/adopt", post(api_adopt_account))
         .route("/api/codebuddy-cli/status", get(api_codebuddy_cli_status))
         .route(
             "/api/codebuddy-cli/install-helper",
@@ -150,6 +152,27 @@ async fn api_accounts() -> Response {
         "current": auth_file::read_auth_file()
             .and_then(|a| a.get("account").and_then(|x| x.get("uid")).and_then(|x| x.as_str()).map(String::from)),
     }))
+}
+
+/// GET /api/accounts/discover —— 识别本机曾登录/留有数据的账号（对照在册）。
+async fn api_discover_accounts() -> Response {
+    json_ok(discover::discover_known_accounts())
+}
+
+/// POST /api/accounts/adopt —— 用最新 auth 历史备份补录指定 uid 进账号库。
+async fn api_adopt_account(Json(body): Json<Value>) -> Response {
+    let uid = body
+        .get("uid")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if uid.trim().is_empty() {
+        return json_err("缺少 uid".to_string(), StatusCode::BAD_REQUEST);
+    }
+    match discover::adopt_account(&uid) {
+        Ok(meta) => json_ok(json!({ "ok": true, "account": meta })),
+        Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+    }
 }
 
 async fn api_codebuddy_cli_status() -> Response {

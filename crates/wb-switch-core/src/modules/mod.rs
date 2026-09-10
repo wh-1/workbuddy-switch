@@ -7,6 +7,7 @@ pub mod codebuddy_cn_ide;
 pub mod config;
 pub mod credit_usage;
 pub mod credits;
+pub mod discover;
 pub mod export_import;
 pub mod oauth;
 pub mod official_usage;

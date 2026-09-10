@@ -15,6 +15,7 @@ import {
 
 import { AccountCard } from "@/components/account-card";
 import { DemoAction } from "@/components/demo-action";
+import { DiscoverAccountsBanner } from "@/components/discover-accounts-banner";
 import { CodeBuddyCnIdeMark, CodeBuddyMark, WorkBuddyMark } from "@/components/product-marks";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -639,6 +640,8 @@ export default function AccountsPage() {
           <AlertDescription>{error}</AlertDescription>
         </Alert>
       )}
+
+      <DiscoverAccountsBanner onAdopted={() => void fetchAll()} />
 
       {codebuddyCli &&
         (!codebuddyCli.configured ||

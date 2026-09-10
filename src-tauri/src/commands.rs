@@ -8,8 +8,8 @@ use serde_json::{json, Value};
 
 use tauri::Emitter;
 use wb_switch_core::modules::{
-    account, align, auth_file, checkin, codebuddy_cli, codebuddy_cn_ide, credit_usage, credits, export_import, oauth,
-    process, refresh, rotate, session, switch, token_stats, update,
+    account, align, auth_file, checkin, codebuddy_cli, codebuddy_cn_ide, credit_usage, credits, discover,
+    export_import, oauth, process, refresh, rotate, session, switch, token_stats, update,
 };
 
 #[derive(Serialize)]
@@ -61,6 +61,21 @@ pub fn get_accounts() -> Value {
         .map(account::account_meta)
         .collect();
     json!({ "accounts": metas })
+}
+
+/// GET /api/accounts/discover —— 识别本机曾登录/留有数据的账号（对照在册）。
+#[tauri::command]
+pub fn discover_known_accounts() -> Value {
+    discover::discover_known_accounts()
+}
+
+/// POST /api/accounts/adopt —— 用最新 auth 历史备份补录指定 uid 进账号库。
+#[tauri::command(rename_all = "camelCase")]
+pub fn adopt_account(uid: String) -> Result<Value, String> {
+    if uid.trim().is_empty() {
+        return Err("缺少 uid".to_string());
+    }
+    discover::adopt_account(&uid).map(|meta| json!({ "ok": true, "account": meta }))
 }
 
 /// GET /api/codebuddy-cli/status —— CodeBuddy CLI helper 轮换状态（不含 token）。

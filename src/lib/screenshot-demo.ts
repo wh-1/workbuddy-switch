@@ -402,6 +402,22 @@ export function screenshotDemoResponse(command: string, args?: Record<string, un
   switch (command) {
     case "get_status": return appStatus;
     case "get_accounts": return { accounts: demoAccounts };
+    case "discover_known_accounts":
+      return {
+        accounts: demoAccounts.map((account) => ({
+          uid: account.uid,
+          nickname: account.nickname,
+          email: account.email,
+          source: "auth-history",
+          backupFiles: 3,
+          backedUpAt: futureAt(-1, 21, 0),
+          inAccountList: true,
+          accessTokenExpiresAt: account.expiresAt,
+          refreshTokenExpiresAt: account.refreshExpiresAt,
+          restorable: true,
+        })),
+      };
+    case "adopt_account": return { ok: true, account: demoAccounts[0] };
     case "get_codebuddy_cli_status": return cliStatus;
     case "switch_codebuddy_cli_account": {
       const target = demoAccounts.find((account) => account.id === args?.accountId);
