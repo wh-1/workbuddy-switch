@@ -104,6 +104,7 @@ pub fn switch_account(
     let mut copy_report: Option<Value> = None;
     let mut session_report: Option<Value> = None;
     let mut align_report: Option<Value> = None;
+    let mut theme_report: Option<Value> = None;
     if opts.restart {
         progress("正在关闭 WorkBuddy…");
         close_workbuddy(20)?;
@@ -129,6 +130,13 @@ pub fn switch_account(
                 &target_uid,
                 source_uid.as_deref(),
                 &align_opts,
+            ));
+            // 主题跟随账号（L6）：备份被切走账号的主题 + 预写目标账号主题，
+            // 重启即为目标主题，不等云端异步回写。失败不阻断切号。
+            progress("正在同步目标账号界面主题…");
+            theme_report = Some(crate::modules::ui_theme::sync_theme_for_switch(
+                source_uid.as_deref(),
+                &target_uid,
             ));
         }
         if opts.share_sessions {
@@ -157,6 +165,9 @@ pub fn switch_account(
     }
     if let Some(a) = align_report {
         result["alignData"] = a;
+    }
+    if let Some(t) = theme_report {
+        result["themeSync"] = t;
     }
     Ok(result)
 }

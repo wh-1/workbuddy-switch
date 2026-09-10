@@ -18,5 +18,6 @@ pub mod session;
 pub mod switch;
 pub mod token_stats;
 pub mod travel;
+pub mod ui_theme;
 pub mod update;
 pub mod vscode_cn_inject;
