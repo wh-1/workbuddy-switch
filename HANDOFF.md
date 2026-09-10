@@ -1,12 +1,16 @@
 # HANDOFF — workbuddy-switch
 
-> 更新：2026-09-10 收尾 · 分支 dev · 工作区干净
+> 更新：2026-09-10 晚 · 分支 dev · 工作区干净
 > 上阶段：合并上游 v0.1.36（travel 派猫猫旅行 + CodeBuddy IDE 用量统计）+ 向上游提交 issue #30
+> 本晚新增：修复切号对齐勾选失效（Tauri/HTTP 双通道参数断层），dev = `272530b` 已推
 > ⚠️ 本阶段发生 `.git` 损坏事故并已完整恢复，见「事故」段
 
 ## 进度（现在在哪）
 
-- **dev = `6fc8ca5`**（含 HANDOFF 备份路径迁移至归档区、接入 w-dev 项目守卫）
+- **dev = `9f802cb`**（切号主题跟随账号 L6；前一节点 `272530b` 修对齐勾选参数断层）
+- 验证：`cargo test -p wb-switch-core` **182 全绿**、`npx tsc --noEmit` 绿、debug exe 已重编
+- **主题跟随（9f802cb）**：主题存 Electron Local Storage（leveldb 键 `agent-ui-theme`，云端异步回写导致切号重启瞬间可能闪默认主题）。切号流程在 App 关闭后备份当前账号主题到 `~/.wb-switch/ui_prefs/`、把目标账号主题 append 进最新 .log（手写 LevelDB log record + CRC32C，append-only、写坏仅被丢弃）。某账号首次切走才生成备份，此前由云端兜底。**待 GUI 实测**：切号重启瞬间主题应直接到位
+- **bug 修复（272530b）**：GUI 切号弹窗勾选项（会话归属/文件对齐/dryRun 预览）被静默丢弃——Tauri 命令嵌套签名 vs 前端扁平 invoke + SwitchOptions 缺 serde camelCase。会话 0 同步的根因即此；automations「同步了」是 WorkBuddy 本体云端同步的巧合。待 GUI 复测：勾「会话归属对齐」切号验证
 - **main = `bbb0d3c`** = 上游 changexbc/workbuddy-switch v0.1.36
 - **origin 已双备份**：dev = `6fc8ca5` / main = `bbb0d3c`
 - 验证：`cargo test -p wb-switch-core` **176 全绿**、`npx tsc --noEmit` 绿、`cargo check` 绿（收尾复核）
