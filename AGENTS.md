@@ -1,4 +1,6 @@
 <!-- TRELLIS:START -->
+
+> 工作目录规范：`D:/w-dev/common/repo-discipline/README.md`（命名 / 目录 / git / 端口 / 安全，19 章）
 # Trellis Instructions
 
 These instructions are for AI assistants working in this project.
