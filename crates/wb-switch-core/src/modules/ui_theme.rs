@@ -246,8 +246,7 @@ fn theme_backup_path(uid: &str) -> PathBuf {
 }
 
 /// 备份某账号的当前主题（app 关闭后调用；读不到就跳过，等下次）。
-fn backup_theme_for(uid: &str, current: Option<&str>) -> bool {
-    let Some(json_text) = current else { return false };
+fn backup_theme_for(uid: &str, current: Option<&str>) -> bool {    let Some(json_text) = current else { return false };
     fs::create_dir_all(prefs_dir()).ok();
     let doc = json!({ "uid": uid, "capturedAt": now_ms(), "themeJson": json_text });
     let p = theme_backup_path(uid);
@@ -256,29 +255,6 @@ fn backup_theme_for(uid: &str, current: Option<&str>) -> bool {
         return false;
     }
     fs::rename(&tmp, &p).is_ok()
-}
-
-/// 恢复目标账号主题：备份存在且与当前值不同才写（写前整目录备份）。
-fn restore_theme_for(dir: &Path, uid: &str) -> Result<bool, String> {
-    let p = theme_backup_path(uid);
-    let Ok(text) = fs::read_to_string(&p) else {
-        return Ok(false); // 该账号还没有备份，交给云端同步兜底
-    };
-    let doc: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
-    let Some(theme_json) = doc.get("themeJson").and_then(|v| v.as_str()) else {
-        return Ok(false);
-    };
-    if let Some(current) = scan_current_theme(dir) {
-        if current == theme_json {
-            return Ok(false); // 已是目标主题，无需写
-        }
-    }
-    // 整目录备份（小文件，几个 MB 以内）
-    let dst = backup_dir().join("localstorage").join(utc_iso());
-    copy_dir_recursive(dir, &dst)
-        .map_err(|e| format!("Local Storage 备份失败: {e}"))?;
-    append_theme_record(dir, now_ms() as u64, theme_json)?;
-    Ok(true)
 }
 
 fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
@@ -298,29 +274,44 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
 // 对外入口
 // ---------------------------------------------------------------------------
 
-/// 切号时同步主题：备份被切走账号的当前主题 → 恢复目标账号的上次主题。
+/// 切号时同步主题：**目标账号继承上一个账号（被切走账号）的主题**。
 ///
-/// 必须在 WorkBuddy 完全关闭后、写 auth/重启前调用。全程只读源 + append 目标，
-/// 任何失败都不阻断切号（只影响主题是否瞬时到位，云端同步最终会兜底）。
+/// 语义（主人定）：主题跟人走——H 浅切到谁，谁就是浅；改深再切，全是深。
+/// 实现：读当前主题（= 上个账号留下的状态）→ 以最新 sequence 追加同值记录
+/// （明确声明继承，保证启动读到该值）→ 更新目标账号的追踪备份。
+///
+/// 已知边界：WorkBuddy 启动后会把**云端账号偏好**回写本地（切号 .log 里
+/// dark/light 交替实锤）。若回写发生，继承值会被拉回——本地无法阻止云端
+/// 下载，只能在启动瞬间保证继承生效。是否被拉回以实测为准。
+///
+/// 必须在 WorkBuddy 完全关闭后、写 auth/重启前调用。任何失败都不阻断切号。
 pub fn sync_theme_for_switch(source_uid: Option<&str>, target_uid: &str) -> Value {
     let dir = leveldb_dir();
     if !dir.is_dir() || target_uid.is_empty() {
-        return json!({ "backedUp": false, "restored": false, "skipped": true });
+        return json!({ "inherited": false, "skipped": true });
     }
-    let current = scan_current_theme(&dir);
+    let Some(current) = scan_current_theme(&dir) else {
+        return json!({ "inherited": false, "reason": "leveldb .log 中未读到当前主题" });
+    };
 
-    let backed_up = source_uid
-        .filter(|u| !u.is_empty() && *u != target_uid)
-        .map(|u| backup_theme_for(u, current.as_deref()))
-        .unwrap_or(false);
-
-    let restored = match restore_theme_for(&dir, target_uid) {
-        Ok(v) => v,
+    // 继承：以最新 sequence 重申当前主题（值不变，声明意图 + 抬高 sequence）
+    // 写前整目录备份（append-only 本已安全，备份兜底以防万一）
+    let dst = backup_dir().join("localstorage").join(utc_iso());
+    if let Err(e) = copy_dir_recursive(&dir, &dst) {
+        return json!({ "inherited": false, "theme": current, "error": format!("Local Storage 备份失败: {e}") });
+    }
+    let appended = match append_theme_record(&dir, now_ms() as u64, &current) {
+        Ok(()) => true,
         Err(e) => {
-            return json!({ "backedUp": backed_up, "restored": false, "error": e });
+            return json!({ "inherited": false, "theme": current, "error": e });
         }
     };
-    json!({ "backedUp": backed_up, "restored": restored })
+
+    // 追踪备份：目标账号继承后的主题快照（供追溯；不再用于"恢复各自主题"）
+    let _ = backup_theme_for(target_uid, Some(&current));
+    let _ = source_uid; // 继承语义下源身份仅用于日志，不参与取值
+
+    json!({ "inherited": appended, "theme": current })
 }
 
 // ---------------------------------------------------------------------------
