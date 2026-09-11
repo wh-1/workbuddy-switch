@@ -759,15 +759,23 @@ fn ide_source(
 /// Return independent WorkBuddy, CodeBuddy CLI, and CodeBuddy IDE aggregates.
 /// `days` is interpreted in Rust using the same millisecond clock for every source.
 pub fn get_statistics(days: Option<i64>) -> Value {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    let generated_at = crate::modules::config::now_ms();
     let range_days = match days {
         Some(7) => Some(7),
         Some(30) => Some(30),
         Some(90) => Some(90),
         _ => None,
     };
-    let cutoff = range_days.map(|value| generated_at - value * 86_400_000);
+    let cutoff = range_days.map(|value| crate::modules::config::now_ms() - value * 86_400_000);
+    get_statistics_since(cutoff)
+}
+
+/// Same collection and accounting rules as [`get_statistics`], but with an
+/// explicit inclusive cutoff so callers can query windows outside the
+/// 7 / 30 / 90 whitelist (for example "today"). `None` means all history.
+pub fn get_statistics_since(cutoff: Option<i64>) -> Value {
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let generated_at = crate::modules::config::now_ms();
+    let range_days = cutoff.map(|value| (generated_at - value) / 86_400_000);
     let ide_projects = ide_project_by_session();
     json!({
         "generatedAt": generated_at,

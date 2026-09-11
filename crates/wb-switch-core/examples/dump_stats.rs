@@ -4,9 +4,13 @@
 //!   cargo run -p wb-switch-core --example dump_stats -- 30
 //!   cargo run -p wb-switch-core --example dump_stats -- 30 --sessions
 //!   cargo run -p wb-switch-core --example dump_stats -- 30 --json out.json
+//!   cargo run -p wb-switch-core --example dump_stats -- --today --sessions
+//!   cargo run -p wb-switch-core --example dump_stats -- --since 1757520000000
 //!
 //! 参数：
 //!   [days]          7 / 30 / 90，省略则全量
+//!   --today         本地当日 00:00 起（白名单外的自定义窗口）
+//!   --since <ms>    自定义起点（含），与 --today 二选一
 //!   --sessions      额外按会话明细输出（token / 命中率）
 //!   --json <path>   把完整统计（含 sessions 数组）写入 JSON 文件
 
@@ -32,12 +36,30 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let days = args.iter().find_map(|a| a.parse::<i64>().ok());
     let show_sessions = args.iter().any(|a| a == "--sessions");
+    let today = args.iter().any(|a| a == "--today");
+    let since = args
+        .iter()
+        .position(|a| a == "--since")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|v| v.parse::<i64>().ok());
     let json_out = args
         .iter()
         .position(|a| a == "--json")
         .and_then(|i| args.get(i + 1));
 
-    let data = wb_switch_core::modules::token_stats::get_statistics(days);
+    let data = if today {
+        // 本地当日 00:00 的毫秒时间戳（白名单外窗口，走 since 入口）
+        use chrono::{Local, TimeZone};
+        let midnight = Local
+            .from_local_datetime(&Local::now().date_naive().and_hms_opt(0, 0, 0).unwrap())
+            .single()
+            .map(|dt| dt.timestamp_millis());
+        wb_switch_core::modules::token_stats::get_statistics_since(midnight)
+    } else if let Some(ms) = since {
+        wb_switch_core::modules::token_stats::get_statistics_since(Some(ms))
+    } else {
+        wb_switch_core::modules::token_stats::get_statistics(days)
+    };
 
     if let Some(path) = json_out {
         match serde_json::to_string_pretty(&data) {
