@@ -36,9 +36,9 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone }: Pro
   const [copySessions, setCopySessions] = useState(false);
   const [alignAutomations, setAlignAutomations] = useState(true);
   const [alignSessions, setAlignSessions] = useState(false);
-  const [alignFiles, setAlignFiles] = useState(false);
+  const [alignFiles, setAlignFiles] = useState(true);
   const [syncProjects, setSyncProjects] = useState(true);
-  const [slimSessions, setSlimSessions] = useState(false);
+  const [slimSessions, setSlimSessions] = useState(true);
   const [previewLines, setPreviewLines] = useState<string[] | null>(null);
   const [previewing, setPreviewing] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());

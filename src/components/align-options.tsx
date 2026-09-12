@@ -8,7 +8,7 @@ export interface AlignOptions {
   alignFiles: boolean;
   /** 同步项目侧栏：补缺占位 + 多余软删（默认开）。 */
   syncProjects: boolean;
-  /** 会话瘦身：每项目保留最近 1 条（默认关）。 */
+  /** 会话瘦身：每项目保留最近 1 条（默认开）。 */
   slimSessions: boolean;
 }
 
