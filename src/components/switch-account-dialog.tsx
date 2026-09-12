@@ -76,7 +76,7 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone }: Pro
       setCopySessions(false);
       setAlignAutomations(true);
       setAlignSessions(false);
-      setAlignFiles(false);
+      setAlignFiles(true);
       setPreviewLines(null);
       setSelected(new Set());
       setExpanded(new Set());
