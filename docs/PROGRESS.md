@@ -77,3 +77,22 @@
 - **全网检索**：官方错误码文档仅"切换模型重试"零机制；腾讯云社区"重置时间系统动态计算"与本地模型互证；php.cn"北京 12 点刷新"与秒级实测矛盾判低质不采信。本地结论全网最高精度。
 - 新增 `scripts/analysis/find_6004_events.py`（检测/join/归因/解窗一体化）；HANDOFF 14:26:22 固定锚结论同步作废。
 - 待解：credit_ledger 三主账本 14:26:22 边界与滑动窗的兼容性；hy3 W 定案。
+
+## 2026-09-12 会话归属对齐排除软删 + 项目侧栏同步/会话瘦身（路线替代上游复制会话）
+
+- **会话归属对齐排除软删**（b67e8bd）：主人确认已删对话不参与新对话上下文（每对话独立 JSONL），对齐改归属无意义 → align.rs sessions 查询加 `deleted_at IS NULL`。
+- **上游调研否决复制路线**：#32（open）复制会话 usage 落盘新 jsonl → token_stats 无去重，作者本机 67% usage 重复、某日虚高 22.7 倍；#9（closed 被拒）复制前去重+存量清理被 maintainer 否。上游 main 现状：复制不去重、统计不去重。本机实测仅 0.7% 重复（集中在 f4413cf7 单文件，没用过复制功能）。
+- **定案（主人多轮收敛）**：切号不复制/不搬运会话正文。连续性 = 设置同步 + 项目占位锚点 + 空锚点续聊；每项目至少一个占位会话，删项目后其他账号切号以上个账号项目清单为准「少的补、多的删」。
+- **新增 `projects_anchor.rs`**（本地专属零冲突）：`sync_project_set_in_db`（补缺 INSERT 占位会话+空 JSONL / 删多软删 / 快照级联防护：清单清零或骤减 30% 中断，force 放行）+ `slim_sessions_in_db`（每 cwd 留 updated_at 最新 N 条）+ `workspace_dir_name`（盘符小写+:删+斜杠转-，33 目录反推验证）。快照 `~/.wb-switch/project_set_snapshot.json` 路径注入可测，6 单测。
+- **命名改造（主人指定）**：数据文件一致性同步 → **设置同步**（吸收主题跟随 → report.settings.theme，报告键 files→settings）；自动化归属对齐 → **定时任务迁入**；会话归属对齐 UI 下线。post_close_sync 签名改 `(target_acc, &AlignOptions)`；SwitchOptions 加 sync_projects/slim_keep。
+- 双门：cargo 194 绿 + tsc 0 错；115daef 已推 origin/dev，pre-commit 全 PASS。
+- 与 L4 设置同步管辖域无交集（L4 管 claw.users/SECRET_KEYS/storage，不管 sessions/cwd）→ 无需改动。
+- 待主人真机验证：占位会话在 WB 侧栏显示、可点开续聊。
+
+## 2026-09-12/13 白屏终局：vite 8.3.0 rolldown 内核根治 rollup 双 React 实例（49182b1）
+
+- 现象：webui/桌面 debug+release 全白屏，`Cannot read properties of null (reading 'useRef'/'useState')`（TooltipProvider/App/UpdateCenter 等）。
+- **三因素叠加**（各自独立都会白屏）：① debug tauri 壳走 devUrl:1420 需 vite dev 常驻（run-dev.cmd 固定等 10s 但 vite 冷启动 ~53s → 8c46a68 改轮询 90s + 落日志）；② esbuild 0.28.2 minify 破坏 React 19 产物（c1884fb 关 minify）；③ **真凶（终局）**：rollup 在 Windows 下对 react CJS 包生成两个模块实例（react_production / react_production$1），部分组件绑到无 dispatcher 的副本 → hooks 返回 null。升级 **vite 8.3.0（rolldown 内核）** 后产物结构正常（import_react 统一绑定）→ 主人真机确认「可以了」。
+- 配套防御（49182b1）：react/react-dom/vite pin 精确版本；vite.config minify:false + react 正则 alias（对象形式 `react:` 前缀会劫持 react/jsx-runtime → 必须正则数组）+ commonjsOptions strictRequires；tauri 加 devtools feature（真机 console 诊断）。
+- 排查方法论：alias 修复曾假阳性——esbuild minify 改名骗过 `var react_production` 计数（零命中是改名了）→ **验证产物要看 import 结构，不看变量名计数**；「dev 正常 vs build 崩」对照直接锁死构建环节；WebView2 缓存（EBWebView，已备份清理）与代码问题无关。
+- 上游官方无此问题：Linux CI 大小写敏感文件系统行为不同。dev 正常/release exe（wb-switch.exe 01:29 / wb-switch-rust.exe 01:30 构建）均验证通过。
