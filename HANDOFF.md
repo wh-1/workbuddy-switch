@@ -1,12 +1,12 @@
 # HANDOFF — workbuddy-switch
 
-> 更新：2026-09-13 凌晨 · 分支 dev · `6f68c39`
+> 更新：2026-09-13 凌晨 · 分支 dev · `b43b55f`
 > 本阶段：**① 项目侧栏同步真机验证通过**（01:42 实切补 18 占位锚点，续聊实证）② **WorkBuddy 5.5.6 回归全绿**（含主题跟随）
 > 前序（2026-09-12）：项目侧栏同步+会话瘦身落地 · 白屏终局 vite 8.3.0 · 6004 滑动窗口 —— 均已归档 `docs/PROGRESS.md`
 
 ## 进度（现在在哪）
 
-- **dev = `6f68c39`**，已推 origin/dev。本阶段提交链：`49182b1`（vite 8.3.0 终局修复）→ `25ab168`（PROGRESS 归档）→ `19e3ccb`（HANDOFF 更新）→ `0429bb3`（验证销账）→ `6f68c39`（5.5.6 事实修正）+ 收尾提交。
+- **dev = `b43b55f`**，已推 origin/dev。本阶段提交链：`49182b1`（vite 8.3.0 终局修复）→ `25ab168`（PROGRESS 归档）→ `19e3ccb`（HANDOFF 更新）→ `0429bb3`（验证销账）→ `6f68c39`（5.5.6 事实修正）→ `b43b55f`（收尾归档）。
 - 双门基线：`cargo test -p wb-switch-core` 194 绿 + tsc 0 错（**勿跑 `--workspace`**，见坑位 14）；release 双 exe 主人真机验证通过。
 - **本阶段无代码改动**：纯验证 + 文档销账，功能闭环。
 - **项目侧栏同步（`crates/wb-switch-core/src/modules/projects_anchor.rs`，本地专属零冲突）**：
