@@ -38,9 +38,15 @@ pub struct SwitchOptions {
     /// 会话归属对齐（multi_sync L3，切号后本地列表全量可见）。
     #[serde(default)]
     pub align_sessions: bool,
-    /// 用户级文件一致性（multi_sync L4/L5：settings/storage/画像/my-files）。
+    /// 设置同步（multi_sync L4/L5：settings/storage/画像/my-files/主题跟随）。
     #[serde(default)]
     pub align_files: bool,
+    /// 同步项目侧栏：目标账号项目集合对齐到源账号（补缺占位 + 多余软删）。
+    #[serde(default)]
+    pub sync_projects: bool,
+    /// 会话瘦身：每项目保留最近 N 条存活会话（0 = 关闭）。
+    #[serde(default)]
+    pub slim_keep: i64,
     /// 预览模式：只统计变更，不落盘。
     #[serde(default)]
     pub dry_run: bool,
@@ -59,6 +65,8 @@ impl Default for SwitchOptions {
             align_automations: true,
             align_sessions: false,
             align_files: false,
+            sync_projects: false,
+            slim_keep: 0,
             dry_run: false,
         }
     }
@@ -83,6 +91,8 @@ pub fn switch_account(
         "alignAutomations": opts.align_automations,
         "alignSessions": opts.align_sessions,
         "alignFiles": opts.align_files,
+        "syncProjects": opts.sync_projects,
+        "slimKeep": opts.slim_keep,
         "restart": opts.restart,
     });
     match &outcome {
@@ -130,6 +140,8 @@ fn switch_account_inner(
             align_automations: opts.align_automations,
             align_sessions: opts.align_sessions,
             align_files: opts.align_files,
+            sync_projects: opts.sync_projects,
+            slim_keep: opts.slim_keep,
             dry_run: true,
         };
         let align_data = align::align_data(&target_uid, source_uid.as_deref(), &align_opts);
@@ -144,7 +156,6 @@ fn switch_account_inner(
     let mut copy_report: Option<Value> = None;
     let mut session_report: Option<Value> = None;
     let mut align_report: Option<Value> = None;
-    let mut theme_report: Option<Value> = None;
     if opts.restart {
         progress("正在关闭 WorkBuddy…");
         close_workbuddy(20)?;
@@ -153,21 +164,18 @@ fn switch_account_inner(
             progress("正在复制会话到目标账号…");
             copy_report = session::copy_sessions_for_switch(&acc, &opts.copy_session_ids);
         }
-        // 对齐 + 主题跟随（本地专属逻辑在 align::post_close_sync，switch.rs 保持薄）
-        let (align, theme) = align::post_close_sync(
-            &acc,
-            opts.align_automations,
-            opts.align_sessions,
-            opts.align_files,
-        );
-        if align.is_some() {
-            progress("正在对齐数据归属到目标账号…");
+        // 设置同步 + 主题跟随 + 项目侧栏同步（本地专属逻辑在 align::post_close_sync，switch.rs 保持薄）
+        align_report = align::post_close_sync(&acc, &AlignOptions {
+            align_automations: opts.align_automations,
+            align_sessions: opts.align_sessions,
+            align_files: opts.align_files,
+            sync_projects: opts.sync_projects,
+            slim_keep: opts.slim_keep,
+            dry_run: false,
+        });
+        if align_report.is_some() {
+            progress("正在执行设置同步与项目侧栏同步…");
         }
-        if theme.is_some() {
-            progress("正在同步目标账号界面主题…");
-        }
-        align_report = align;
-        theme_report = theme;
         if opts.share_sessions {
             // 旧的「全体转移」兼容路径（默认关闭），Rust 版暂未实现
             session_report = Some(json!({"error": "share_sessions 兼容路径暂未在 Rust 版实现"}));
@@ -194,9 +202,6 @@ fn switch_account_inner(
     }
     if let Some(a) = align_report {
         result["alignData"] = a;
-    }
-    if let Some(t) = theme_report {
-        result["themeSync"] = t;
     }
     Ok(result)
 }

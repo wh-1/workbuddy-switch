@@ -14,6 +14,7 @@ pub mod oauth;
 pub mod official_usage;
 pub mod oplog;
 pub mod process;
+pub mod projects_anchor;
 pub mod refresh;
 pub mod rotate;
 pub mod session;

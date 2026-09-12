@@ -284,6 +284,8 @@ export function switchAccount(args: {
   alignAutomations?: boolean;
   alignSessions?: boolean;
   alignFiles?: boolean;
+  syncProjects?: boolean;
+  slimKeep?: number;
   dryRun?: boolean;
 }): Promise<SwitchResult> {
   return call("switch_account", args as unknown as Record<string, unknown>);
@@ -300,6 +302,8 @@ export function alignData(args: {
   alignAutomations?: boolean;
   alignSessions?: boolean;
   alignFiles?: boolean;
+  syncProjects?: boolean;
+  slimKeep?: number;
   dryRun?: boolean;
 }): Promise<AlignDataReport> {
   return call("align_data", args as unknown as Record<string, unknown>);

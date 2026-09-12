@@ -135,13 +135,25 @@ export interface AlignDataReport {
   backup?: { db: string | null; settings: string | null };
   automations?: { updated: number; outbox: number };
   sessions?: { updated: number; triggerRemoved: boolean; error?: string };
-  files?: {
+  /** 「设置同步」：settings 深合并 / storage 补齐 / 画像 / my-files / 主题跟随。 */
+  settings?: {
     sourceUid?: string | null;
-    settings?: { changed: number; keys?: string[]; skipped?: boolean; error?: string };
+    claw?: { changed: number; keys?: string[]; skipped?: boolean; error?: string };
     storage?: { copied: number; skipped: number; deferred: number; samples?: string[] };
     memory?: { changed: boolean; bytes?: number; skipped?: boolean };
     myFiles?: { files: number; changed: number; keys: number };
+    theme?: Record<string, unknown>;
   };
+  /** 「同步项目侧栏」：补缺占位 + 多余软删。 */
+  projects?: {
+    addedCount?: number;
+    removedCount?: number;
+    added?: { cwd: string; sessionId?: string; planned?: boolean }[];
+    removedProjects?: { cwd: string; sessions: number; planned?: boolean }[];
+    error?: string;
+  };
+  /** 「会话瘦身」：每项目保留最近 N 条。 */
+  slim?: { uid?: string; keep?: number; planned?: number; deleted?: number; error?: string };
 }
 
 export interface CheckinConfig {

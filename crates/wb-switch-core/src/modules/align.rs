@@ -44,11 +44,20 @@ fn is_merge_only(name: &str) -> bool {
 }
 
 /// 对齐选项（dry_run=true 时只统计不落盘）。
+///
+/// 命名（2026-09-12 定稿）：align_automations = 「定时任务迁入」；
+/// align_sessions = 「会话归属对齐」（已下线，代码保留）；align_files = 「设置同步」
+/// （含 settings 深合并 / storage 补齐 / 画像 / my-files / 主题跟随）；
+/// sync_projects = 「同步项目侧栏」；slim_keep = 「会话瘦身」保留条数（0=关）。
 #[derive(Debug, Clone, Default)]
 pub struct AlignOptions {
     pub align_automations: bool,
     pub align_sessions: bool,
     pub align_files: bool,
+    /// 同步项目侧栏：目标账号项目集合对齐到源账号（补缺占位 + 多余软删）。
+    pub sync_projects: bool,
+    /// 会话瘦身：每项目保留最近 N 条存活会话（0 或缺省 = 关闭）。
+    pub slim_keep: i64,
     pub dry_run: bool,
 }
 
@@ -566,8 +575,8 @@ pub fn align_data(target_uid: &str, source_uid: Option<&str>, opts: &AlignOption
         "dryRun": opts.dry_run,
         "automations": { "updated": 0, "outbox": 0 },
         "sessions": { "updated": 0, "triggerRemoved": false },
-        "files": {
-            "settings": { "changed": 0, "skipped": true },
+        "settings": {
+            "claw": { "changed": 0, "skipped": true },
             "storage": { "copied": 0, "skipped": 0, "deferred": 0, "samples": [] },
             "memory": { "changed": false },
             "myFiles": { "files": 0, "changed": 0, "keys": 0 },
@@ -606,10 +615,10 @@ pub fn align_data(target_uid: &str, source_uid: Option<&str>, opts: &AlignOption
         let source = source_uid
             .map(|s| s.to_string())
             .or_else(|| pick_source(target_uid));
-        report["files"]["sourceUid"] = json!(source);
+        report["settings"]["sourceUid"] = json!(source);
         if let Some(src) = source {
             if src != target_uid {
-                report["files"]["settings"] =
+                report["settings"]["claw"] =
                     align_settings_claw_users(&src, target_uid, opts.dry_run);
 
                 let mut copied = 0usize;
@@ -623,15 +632,15 @@ pub fn align_data(target_uid: &str, source_uid: Option<&str>, opts: &AlignOption
                         &s, &d, opts.dry_run, &mut copied, &mut skipped, &mut deferred, &mut samples,
                     );
                 }
-                report["files"]["storage"] = json!({
+                report["settings"]["storage"] = json!({
                     "copied": copied, "skipped": skipped, "deferred": deferred, "samples": samples,
                 });
 
-                report["files"]["memory"] = align_memory_profile(&src, target_uid, opts.dry_run);
+                report["settings"]["memory"] = align_memory_profile(&src, target_uid, opts.dry_run);
             }
         }
         let accounts = discover_accounts();
-        report["files"]["myFiles"] = merge_my_files_all(&accounts, opts.dry_run);
+        report["settings"]["myFiles"] = merge_my_files_all(&accounts, opts.dry_run);
     }
 
     report
@@ -640,28 +649,40 @@ pub fn align_data(target_uid: &str, source_uid: Option<&str>, opts: &AlignOption
 /// 切号「关进程之后」的数据后置同步：归属/文件对齐 + 界面主题跟随。
 ///
 /// 从 `switch.rs` 内联块下沉到这里（本地专属文件），使 switch.rs 的本地改动保持最小。
-/// 返回 `(align_report, theme_report)`；主题同步失败不影响切号（返回的 Value 里带 error）。
-pub fn post_close_sync(
-    target_acc: &Value,
-    align_automations: bool,
-    align_sessions: bool,
-    align_files: bool,
-) -> (Option<Value>, Option<Value>) {
+/// 返回 `align_report`；主题跟随（原独立 theme_report）已并入报告的 `settings.theme`
+/// 子项——主题即账号外观设置，归入「设置同步」呈现（2026-09-12 定稿）。
+pub fn post_close_sync(target_acc: &Value, opts: &AlignOptions) -> Option<Value> {
     let target_uid = account_uid(target_acc);
-    if target_uid.is_empty() || !(align_automations || align_sessions || align_files) {
-        return (None, None);
+    if target_uid.is_empty()
+        || !(opts.align_automations || opts.align_sessions || opts.align_files || opts.sync_projects || opts.slim_keep > 0)
+    {
+        return None;
     }
     let source_uid = crate::modules::session::current_user_uid();
-    let opts = AlignOptions {
-        align_automations,
-        align_sessions,
-        align_files,
-        dry_run: false,
-    };
-    let align_report = Some(align_data(&target_uid, source_uid.as_deref(), &opts));
+    let mut full_opts = opts.clone();
+    full_opts.dry_run = false;
+    let mut report = align_data(&target_uid, source_uid.as_deref(), &full_opts);
+
+    // 同步项目侧栏：目标账号项目集合对齐到源账号（补缺占位 + 多余软删）。
+    if opts.sync_projects {
+        if let Some(src) = source_uid.as_deref() {
+            match crate::modules::projects_anchor::sync_project_set(src, &target_uid, false, false) {
+                Ok(r) => report["projects"] = r,
+                Err(e) => report["projects"] = json!({ "error": e }),
+            }
+        }
+    }
+
+    // 会话瘦身：每项目保留最近 N 条存活会话（放在项目同步之后，占位行也会纳入统计）。
+    if opts.slim_keep > 0 {
+        match crate::modules::projects_anchor::slim_sessions(&target_uid, opts.slim_keep, false) {
+            Ok(r) => report["slim"] = r,
+            Err(e) => report["slim"] = json!({ "error": e }),
+        }
+    }
 
     // 主题跟随账号：本地继承（leveldb 注入，启动瞬间生效）+ 云端继承
-    // （把 target 的云端外观选择改成 source 的值，根治回跳）。
+    // （把 target 的云端外观选择改成 source 的值，根治回跳）。并入「设置同步」。
     let source_acc = source_uid.as_deref().and_then(|uid| {
         crate::modules::account::load_accounts()
             .into_iter()
@@ -671,13 +692,13 @@ pub fn post_close_sync(
         .as_ref()
         .and_then(|a| crate::modules::account::get_str(a, "access_token"));
     let target_token = crate::modules::account::get_str(target_acc, "access_token");
-    let theme_report = Some(crate::modules::ui_theme::sync_theme_for_switch(
+    report["settings"]["theme"] = crate::modules::ui_theme::sync_theme_for_switch(
         source_uid.as_deref(),
         &target_uid,
         source_token.as_deref(),
         target_token.as_deref(),
-    ));
-    (align_report, theme_report)
+    );
+    Some(report)
 }
 
 #[cfg(test)]

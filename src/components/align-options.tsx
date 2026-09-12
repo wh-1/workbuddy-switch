@@ -6,13 +6,15 @@ export interface AlignOptions {
   alignAutomations: boolean;
   alignSessions: boolean;
   alignFiles: boolean;
+  /** 同步项目侧栏：补缺占位 + 多余软删（默认开）。 */
+  syncProjects: boolean;
+  /** 会话瘦身：每项目保留最近 1 条（默认关）。 */
+  slimSessions: boolean;
 }
 
 interface Props {
   value: AlignOptions;
   onChange: (next: AlignOptions) => void;
-  /** 勾选「会话归属对齐」时取消「复制会话」（二选一） */
-  onAlignSessions?: (checked: boolean) => void;
   previewLines: string[] | null;
 }
 
@@ -39,31 +41,35 @@ function Row({
 }
 
 /** 切号弹窗里的三个对齐开关 + 预览结果。 */
-export function AlignOptionsPanel({ value, onChange, onAlignSessions, previewLines }: Props) {
+export function AlignOptionsPanel({ value, onChange, previewLines }: Props) {
   return (
     <>
       <Row
-        title="自动化跟随切换"
-        hint="把当前所有未删除自动化的归属改到目标账号，切换后目标账号即可见可管（本地操作，不影响云端）"
+        title="定时任务迁入"
+        hint="把当前所有未删除定时任务的归属迁到目标账号，切换后即可见可管（本地操作，不影响云端）"
         checked={value.alignAutomations}
         onCheckedChange={(v) => onChange({ ...value, alignAutomations: v })}
       />
 
       <Row
-        title="会话归属对齐（全量可见）"
-        hint="把所有本地会话归属改到目标账号，切换后看到全量对话列表；与上面的复制会话二选一即可"
-        checked={value.alignSessions}
-        onCheckedChange={(v) => {
-          onChange({ ...value, alignSessions: v });
-          onAlignSessions?.(v);
-        }}
+        title="设置同步"
+        hint="settings 配置、storage 用户数据、画像缓存按最近活跃账号补齐；my-files 取全账号并集；界面主题跟随目标账号（凭据类键不迁移，防串号）"
+        checked={value.alignFiles}
+        onCheckedChange={(v) => onChange({ ...value, alignFiles: v })}
       />
 
       <Row
-        title="数据文件一致性同步"
-        hint="settings 配置、storage 用户数据、画像缓存按最近活跃账号补齐；my-files 取全账号并集（凭据类键不迁移，防串号）"
-        checked={value.alignFiles}
-        onCheckedChange={(v) => onChange({ ...value, alignFiles: v })}
+        title="同步项目侧栏"
+        hint="切换后侧栏项目与当前账号一致：缺的项目补一个空白占位对话，多余项目下的对话软删（JSONL 保留可恢复）"
+        checked={value.syncProjects}
+        onCheckedChange={(v) => onChange({ ...value, syncProjects: v })}
+      />
+
+      <Row
+        title="会话瘦身"
+        hint="每个项目只保留最近 1 条对话，其余软删（JSONL 保留，Token 统计不受影响）"
+        checked={value.slimSessions}
+        onCheckedChange={(v) => onChange({ ...value, slimSessions: v })}
       />
 
       {previewLines && (
@@ -98,10 +104,10 @@ export function formatAlignReport(r: AlignDataReport): string[] {
         : `会话归属：${r.sessions.updated} 条待对齐`,
     );
   }
-  const f = r.files;
+  const f = r.settings;
   if (f) {
-    if (f.settings?.changed) lines.push(`settings.json：${f.settings.changed} 项差异`);
-    else if (f.settings) lines.push("settings.json：已一致");
+    if (f.claw?.changed) lines.push(`settings.json：${f.claw.changed} 项差异`);
+    else if (f.claw) lines.push("settings.json：已一致");
     if (f.storage) {
       lines.push(
         `storage 文件：待复制 ${f.storage.copied}，跳过 ${f.storage.skipped}，并集 ${f.storage.deferred}`,
@@ -109,6 +115,18 @@ export function formatAlignReport(r: AlignDataReport): string[] {
     }
     if (f.memory) lines.push(f.memory.changed ? "画像缓存：待对齐" : "画像缓存：已一致");
     if (f.myFiles) lines.push(`my-files.json：${f.myFiles.files} 份，待更新 ${f.myFiles.changed}`);
+    if (f.theme) lines.push("界面主题：跟随目标账号");
+  }
+  if (r.projects) {
+    if (r.projects.error) lines.push(`项目侧栏同步出错：${r.projects.error}`);
+    else
+      lines.push(
+        `项目侧栏：待补 ${r.projects.addedCount ?? 0} 个占位，待删 ${r.projects.removedCount ?? 0} 条多余对话`,
+      );
+  }
+  if (r.slim) {
+    if (r.slim.error) lines.push(`会话瘦身出错：${r.slim.error}`);
+    else lines.push(`会话瘦身：每项目留 ${r.slim.keep ?? 1} 条，待删 ${r.slim.planned ?? 0} 条`);
   }
   lines.push(r.dryRun ? "以上为预览结果，尚未落盘" : "对齐完成（已先备份 db 与 settings）");
   return lines;

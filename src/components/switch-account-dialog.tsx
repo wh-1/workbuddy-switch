@@ -37,6 +37,8 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone }: Pro
   const [alignAutomations, setAlignAutomations] = useState(true);
   const [alignSessions, setAlignSessions] = useState(false);
   const [alignFiles, setAlignFiles] = useState(false);
+  const [syncProjects, setSyncProjects] = useState(true);
+  const [slimSessions, setSlimSessions] = useState(false);
   const [previewLines, setPreviewLines] = useState<string[] | null>(null);
   const [previewing, setPreviewing] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -131,6 +133,8 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone }: Pro
         alignAutomations: alignAutomations,
         alignSessions: alignSessions,
         alignFiles: alignFiles,
+        syncProjects: syncProjects,
+        slimKeep: slimSessions ? 1 : 0,
       });
       const nickname = account.nickname || account.email || account.uid || "该账号";
       const parts: string[] = [];
@@ -143,8 +147,17 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone }: Pro
       if (res.alignData?.sessions?.updated) {
         parts.push(`已对齐 ${res.alignData.sessions.updated} 个会话`);
       }
-      if (res.alignData?.files?.storage?.copied) {
-        parts.push(`已同步 ${res.alignData.files.storage.copied} 个文件`);
+      if (res.alignData?.settings?.storage?.copied) {
+        parts.push(`已同步 ${res.alignData.settings.storage.copied} 个文件`);
+      }
+      if (res.alignData?.projects?.addedCount) {
+        parts.push(`已补 ${res.alignData.projects.addedCount} 个项目占位`);
+      }
+      if (res.alignData?.projects?.removedCount) {
+        parts.push(`已清理 ${res.alignData.projects.removedCount} 条多余对话`);
+      }
+      if (res.alignData?.slim?.deleted) {
+        parts.push(`会话瘦身：已删 ${res.alignData.slim.deleted} 条`);
       }
       if (res.backup) parts.push(`备份: ${res.backup}`);
       toast.success(`已切换至「${nickname}」`, {
@@ -170,6 +183,8 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone }: Pro
         alignAutomations: alignAutomations,
         alignSessions: alignSessions,
         alignFiles: alignFiles,
+        syncProjects: syncProjects,
+        slimKeep: slimSessions ? 1 : 0,
         dryRun: true,
       });
       setPreviewLines(res.alignData ? formatAlignReport(res.alignData) : ["无对齐数据"]);
@@ -287,14 +302,13 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone }: Pro
           </div>
 
           <AlignOptionsPanel
-            value={{ alignAutomations, alignSessions, alignFiles }}
+            value={{ alignAutomations, alignSessions, alignFiles, syncProjects, slimSessions }}
             onChange={(next) => {
               setAlignAutomations(next.alignAutomations);
               setAlignSessions(next.alignSessions);
               setAlignFiles(next.alignFiles);
-            }}
-            onAlignSessions={(v) => {
-              if (v) setCopySessions(false);
+              setSyncProjects(next.syncProjects);
+              setSlimSessions(next.slimSessions);
             }}
             previewLines={previewLines}
           />
@@ -454,7 +468,7 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone }: Pro
           <Button
             variant="secondary"
             onClick={doPreview}
-            disabled={busy || previewing || (!alignAutomations && !alignSessions && !alignFiles)}
+            disabled={busy || previewing || (!alignAutomations && !alignSessions && !alignFiles && !syncProjects && !slimSessions)}
           >
             {previewing ? "统计中…" : "预览对齐"}
           </Button>
