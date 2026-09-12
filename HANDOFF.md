@@ -47,6 +47,6 @@
 2. **上游 #32 监控**：若合并需跟进；本机已用「占位不复制」路线规避。
 3. **解死 hy3 窗口长（下次 hy3 触发时）**：跑 `scripts/analysis/find_6004_events.py`，锚 ≈3h vs 4.5h 二选一定案。
 4. **`model_daily_limit_check.py` 重窗方案重评**：先解释 credit_ledger 14:26:22 边界与滑动窗模型的兼容性，再定检查脚本去留。
-5. 安装 WorkBuddy **5.5.6**（包在 `C:\Users\WH\AppData\Local\Temp\workbuddy-update-x64\`；装前 `git tag pre-5.5.6` + 快照 `~/.wb-switch/`；装后回归切号主题跟随 + 项目侧栏同步 + 对齐勾选）。
+5. ~~安装 WorkBuddy **5.5.6**~~ ✅ **已装（2026-09-12，实测 `resources/install-manifest.json` appVersion=5.5.6）**。装后回归：**01:42 实切验证即在 5.5.6 环境完成** → 项目侧栏同步 ✓ / 设置同步 ✓ / 定时任务迁入 9 条 ✓；**仅剩主题跟随（L6）待主人肉眼确认**。打点：`pre-5.5.6` tag = `0429bb3`（注：标签是装后补打的，语义应为「5.5.6 回归基线」）+ `~/.wb-switch/backups/pre-5.5.6-snapshot/` 4 文件快照。
 6. issue #30 跟进（vite → 账号发现 → 数据对齐 顺序提 PR，注意 vite 部分需改述为本机环境问题）；H 余额 95% 已用，切号对话框"余额告急+逼近峰值"提醒可做。
 7. src-tauri devtools feature 保留（诊断用，release 无副作用）——已定，无需处理。
