@@ -106,3 +106,20 @@
 - 上游 #32 复核：仍 open、维护者零响应，本机「占位不复制」路线规避充分，继续被动监控。
 - 坑位补记：oplog 报告结构是 `result.alignData.projects`（非顶层 `projects`）；sessions 校验须用完整 UUID 精确 `=`，8 位前缀 LIKE 会误判。
 - 双门：`cargo test -p wb-switch-core` 194 绿 + tsc 0 错；dev 推至 `6f68c39`。**`cargo test --workspace` 不可用**：`wb-switch-rust --lib` 测试二进制启动即 `STATUS_ENTRYPOINT_NOT_FOUND`(0xc0000139，DLL 入口缺失)，属 Tauri 壳 crate 运行期环境限制，与代码无关。
+
+## 2026-09-13 切号体验收口：默认全开 / 复制体保护 / 预览覆盖破坏性操作（abd3920 → b946875）
+
+- **对齐项默认全开**（主人指示）：定时任务迁入 / 设置同步 / 同步项目侧栏 / 会话瘦身四项默认勾选。
+  - 踩坑：`useState(true)` 改了不生效——弹窗 `open` 的 `useEffect`（`switch-account-dialog.tsx:74-82`）里另有硬编码 `setAlignFiles(false)` 覆盖。**改勾选项默认值必须两处同改**。
+- **复制会话 × 新功能 冲突面分析**（结论：只有瘦身真冲突）：
+  - 定时任务迁入 / 设置同步 = 零交集；项目侧栏基本无（唯一边缘：被复制会话 `cwd` 为 NULL/空时被判"多余项目"软删）；**会话瘦身 = 真冲突**——同项目复制多条时除最新 1 条外全被软删。
+  - 附带认知项：复制会复制 JSONL → Token 重复统计（上游 #32），且瘦身是**软删 DB 行、JSONL 保留**，界面消失统计仍在；`register_edge_sync_mapping` 的云端映射不随本地软删撤销。
+  - 实现：`slim_sessions(_in_db)` 加 `exclude: &[String]`——排除集既不入删除名单（外层 `AND s.id NOT IN`）、**也不占保留名额**（子查询同样排除）。`switch.rs` 新增 `copied_session_ids()` 从复制报告取 `newId` 作保护名单传入 `post_close_sync`。报告加 `excluded` 字段。
+  - 新单测 `slim_protects_copied_sessions`：无保护 keep=1 → 只剩 1 条（deleted=3）；有保护 → 复制体全留 + 原有最新一条也留（deleted=1）。**195 绿**（原 194）。
+- **对齐预览补齐**：dry_run 原先只跑 `align_data`，报告无 `projects`/`slim`/`theme`，前端渲染逻辑早写好却拿不到数据——偏偏这两项是唯一破坏性操作。
+  - `align.rs` 抽出 `append_project_and_slim()`（真实/预览共用，顺序固定：先项目同步后瘦身），新增 `preview_sync()`：只统计不落盘；**主题只给 `{"planned":true}`**（`sync_theme_for_switch` 会写 leveldb + 云端，预览绝不能调）。
+  - 前端补明细：将清空项目 Top3、瘦身涉及项目 Top3（新增 `basename()`）；预览提示「本次复制的对话会被跳过，删除数可能更少」。`types.ts` 补 `slim.groups`/`slim.excluded`。
+- **上游对比（基线 main=7ebd4cb 0.1.37 vs dev）**：51 文件 +6799/-890，新增 25 / 修改 26。本地逻辑 ~96% 住在新文件（align / projects_anchor / discover / ui_theme / oplog / api_local / commands_local + 8 个分析脚本）；动到的上游热文件都很轻：`AccountsPage.tsx`(23 次) 只 +3、`commands.rs`(21 次) +25/-11、`api.rs`(19 次)**净减 19 行**。
+- **派猫猫旅行**（上游 `0b0d667` 引入，本地零改动）：官网成长中心挂机玩法，wb-switch 做自动托管——启动即派发、30 分钟补派、15 分钟检查领奖；状态机 idle→traveling→arrived→claim；**咖啡馆 = 服务端下发的地点名之一**（非独立功能）。实测本机 4 账号：单账号每天 1 次、随机 5~9 积分、一趟约 1 小时，满勤 ≈20~36 积分/天（今日 27）。账本 `~/.wb-switch/travel_cache.json`（只存当天）。
+- 坑位补记：server **package 名是 `wb-switch-server`**（bin 才叫 `wb-switch`）；exe 编译报 os error 5 但查不到进程 → `mv` 成 `.prev.exe` 绕开再编。
+- 双门：cargo 195 绿 + tsc 0 错；dev 推至 `b946875`。

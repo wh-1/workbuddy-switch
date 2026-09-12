@@ -1,54 +1,51 @@
 # HANDOFF — workbuddy-switch
 
-> 更新：2026-09-13 凌晨 · 分支 dev · `b43b55f`
-> 本阶段：**① 项目侧栏同步真机验证通过**（01:42 实切补 18 占位锚点，续聊实证）② **WorkBuddy 5.5.6 回归全绿**（含主题跟随）
-> 前序（2026-09-12）：项目侧栏同步+会话瘦身落地 · 白屏终局 vite 8.3.0 · 6004 滑动窗口 —— 均已归档 `docs/PROGRESS.md`
+> 更新：2026-09-13 凌晨 · 分支 dev · `b946875`
+> 本阶段：**切号体验收口**——① 对齐项默认全开 ② 复制会话与瘦身的冲突修复 ③ 对齐预览覆盖破坏性操作
+> 前序（已归档 `docs/PROGRESS.md`）：项目侧栏同步真机验证 · 白屏终局 vite 8.3.0 · 6004 滑动窗口
 
 ## 进度（现在在哪）
 
-- **dev = `b43b55f`**，已推 origin/dev。本阶段提交链：`49182b1`（vite 8.3.0 终局修复）→ `25ab168`（PROGRESS 归档）→ `19e3ccb`（HANDOFF 更新）→ `0429bb3`（验证销账）→ `6f68c39`（5.5.6 事实修正）→ `b43b55f`（收尾归档）。
-- 双门基线：`cargo test -p wb-switch-core` 194 绿 + tsc 0 错（**勿跑 `--workspace`**，见坑位 14）；release 双 exe 主人真机验证通过。
-- **本阶段无代码改动**：纯验证 + 文档销账，功能闭环。
-- **项目侧栏同步（`crates/wb-switch-core/src/modules/projects_anchor.rs`，本地专属零冲突）**：
-  - `sync_project_set_in_db`：切号后以上个账号项目清单（cwd 集合）为准——少的补（INSERT 占位会话 + 空 JSONL）、多的删（软删）；快照 `~/.wb-switch/project_set_snapshot.json` 级联防护（清单清零/骤减 30% 中断，force 放行）。
-  - `slim_sessions_in_db`：每 cwd 保留 updated_at 最新 N 条（soft delete）。
-  - `workspace_dir_name`：盘符小写 + `:` 删 + `\`/`/` → `-`（33 目录反推验证）。
-  - 前端勾选项「同步项目侧栏」+ 瘦身条数；SwitchOptions/AlignOptions 加 `sync_projects`/`slim_keep`。
-- **命名定稿（主人指定）**：数据文件一致性同步 → **设置同步**（含主题跟随，报告键 `files`→`settings`）；自动化归属对齐 → **定时任务迁入**；会话归属对齐 UI 下线（代码保留，默认排除软删）。
-- **白屏终局**：rollup（vite 7.3.6）在 Windows 对 react CJS 包生成双模块实例（`react_production`/`react_production$1`），部分组件绑无 dispatcher 副本 → hooks null 白屏。**vite 8.3.0（rolldown 内核）是真解**；minify:false（esbuild 0.28.2 也破坏 React 19）+ react 正则 alias + strictRequires 为配套防御。tauri 加 devtools feature。
+- **dev = `b946875`**，已推 origin/dev。本阶段提交链：`abd3920`（默认勾选设置同步+瘦身）→ `0aba0ca`（修 open 时重置为关）→ `1759e33`（瘦身跳过复制体）→ `b946875`（预览覆盖项目侧栏+瘦身）。
+- 双门基线：`cargo test -p wb-switch-core` **195 绿** + `tsc --noEmit` 0 错（**勿跑 `--workspace`**，见坑位 14）。
+- 四个勾选项**默认全开**：定时任务迁入 / 设置同步 / 同步项目侧栏 / 会话瘦身；「会话归属对齐」UI 已下线（代码保留）。
+- 切号执行顺序（**不可随意调**，switch.rs:163→168）：`close_workbuddy → copy_sessions（上游）→ align_data（迁入/设置同步/主题）→ sync_project_set（项目侧栏）→ slim_sessions（瘦身）`。
+- **待主人真机验证**：重编的 GUI（03:24）与 server（03:22）——① 弹窗四项默认全勾 ② 点「预览对齐」应出现「项目侧栏 / 会话瘦身 / 界面主题」三段及明细。
 
 ## 决策（为什么这样做）
 
-- **切号不复制会话（核心路线）**：上游 #32（open）复制会话致 Token 重复统计（作者本机 67% usage 重复）；#9（closed 被拒）复制去重被 maintainer 否。本路线规避两者：不复制正文 → 无重复 usage、无侧栏副本雪球；连续性由「设置同步 + 项目占位 + 空锚点续聊」保证。
-- **会话归属对齐排除软删**：已删对话不参与新对话上下文，改归属无意义（`deleted_at IS NULL`）。
-- **L4 设置同步未改**：与项目侧栏管辖域无交集（L4 管 claw.users/SECRET_KEYS/storage）。
-- **暂不切 MSVC 工具链**（主人确认）：dlltool 是 release 首编一次性税，切链成本 > 留 GNU；**触发条件 = 下次 dlltool 卡 >1h**。
-- 历史决策（统计口径/账本/6004 滑动窗口/对齐分层等）见 `docs/PROGRESS.md` 与下文坑位，此处不重复。
+- **切号不复制会话（核心路线）**：上游 #32（open）复制会话致 Token 重复统计；#9（closed 被拒）。本机用「占位不复制」规避，连续性由设置同步 + 项目占位 + 空锚点续聊保证。
+- **复制体受瘦身保护**：复制会话与瘦身并存时，复制体既不被删、也不占每项目保留名额（`slim_sessions(..., exclude)`）——否则同项目复制多条会被瘦成 1 条。
+- **预览必须覆盖破坏性操作**：dry_run 原先只跑 `align_data`，看不到项目侧栏/瘦身计划，而这两项是唯一会软删会话的操作。新增 `preview_sync()` 只统计不落盘。
+- **预览不碰主题**：`sync_theme_for_switch` 会写 leveldb + 云端，预览只给 `{"planned": true}` 占位。
+- **暂不切 MSVC 工具链**：dlltool 是 release 首编一次性税；**触发条件 = 下次 dlltool 卡 >1h**。
+- 命名定稿：数据文件一致性同步 → **设置同步**（含主题跟随，报告键 `files`→`settings`）；自动化归属对齐 → **定时任务迁入**。
 
 ## 坑位（别再踩）
 
-1. **统计口径三条公式**（权威：`crates/wb-switch-core/src/modules/token_stats.rs`）：`total = input + output + cacheWrite`（input 已含 cacheRead）；命中率 `= cacheRead / input`；usage 优先级 `message > providerData > 顶层` 且须有 input 字段；一个 JSONL = 一个对话，排除 `subagents/`。
-2. **前端构建三坑**：① `npm`/`npx` 在沙箱触发 Program Blacklist（wsl.exe）→ 一律 `node node_modules/vite/bin/vite.js` / `node node_modules/typescript/bin/tsc --noEmit`；② vite alias 对象形式 `react:` 前缀劫持 `react/jsx-runtime` → 用正则数组；③ **验证产物看 import 结构，不看变量名计数**（minify 改名会骗过 `var react_production` 计数，曾致 alias 修复假阳性）。
-3. **AI 沙箱里 server 起不来**：取数走 `examples/dump_stats.exe`。example 产物 `target/debug/examples/dump_stats.exe`；GNU 三件套（`RUSTFLAGS=-C link-arg=-fuse-ld=lld` + w64devkit 入 PATH），增量约 15s。
-4. AI 沙箱读不了宿主 `CodeBuddyExtension/.../auth`（os error 5）→ 放行前台命令。
-5. 版本判定只看 `resources/install-manifest.json` 的 `appVersion`；`version` 文件是 Electron 内核版本。
-6. 大仓库 git 写操作不进 2 分钟前台窗口（曾两次损坏 `.git`）；`gc.auto=0` 勿改回；关键节点必须 push。
-7. 编译前停掉运行中的 `wb-switch.exe` / `wb-switch-rust.exe`（os error 5 锁文件；Git Bash 下用 `MSYS_NO_PATHCONV=1 taskkill /IM ... /F`）。
-8. `.cmd` 必须纯 ASCII + CRLF + 开头 `chcp 65001`。
-9. 账本聚合先按 (账号,日,模型) 汇总日累计再取 max，别拿逐行比大小。
-10. Git Bash 下 `$USERPROFILE` 会被 mangled → 用 Python `os.path.expanduser("~")`。
-11. **6004 日志里没有账号字段**；长哈希先做"同实体多值"反证再当主键用。
-12. **debug tauri 壳走 devUrl:1420 需 vite dev 常驻**（release 才内嵌 dist）；vite 冷启动 ~53s，`scripts/run-dev.cmd` v2 已改轮询 90s + 日志落 `target/vite-dev.log`。
-13. WebView2 缓存目录 `%LOCALAPPDATA%\com.wbswitch.app\EBWebView`——清缓存不能解代码问题（排查时可排除但别指望它修）。
-14. **双门只看 `cargo test -p wb-switch-core`（194 绿）**，别跑 `--workspace`：`wb-switch-rust --lib` 测试二进制启动即 `STATUS_ENTRYPOINT_NOT_FOUND`(0xc0000139，Tauri 壳 DLL 入口缺失)，是运行期环境限制不是回归，会误判为失败。
-15. **oplog 报告结构**：`result.alignData.projects`（不在顶层）；校验 sessions 须用完整 UUID 精确 `=`——8 位前缀 LIKE 会把别的历史会话混进来。
+1. **统计口径三条公式**（权威 `modules/token_stats.rs`）：`total = input + output + cacheWrite`；命中率 `= cacheRead / input`；usage 优先级 `message > providerData > 顶层` 且须有 input 字段；一个 JSONL = 一个对话，排除 `subagents/`。
+2. **前端构建三坑**：① `npm`/`npx` 触发沙箱黑名单 → 用 `node node_modules/vite/bin/vite.js` / `node node_modules/typescript/bin/tsc --noEmit`；② vite alias 用正则数组（对象形式 `react:` 会劫持 `react/jsx-runtime`）；③ 验证产物看 import 结构，不看变量名计数。
+3. **勾选项默认值有两处**：`useState` 初值 **和** 弹窗 `open` 的 `useEffect` 硬编码重置（`switch-account-dialog.tsx:74-82`）。**改默认值必须两处同改**——只改 useState 会被 useEffect 覆盖（曾致「设置同步」默认关）。
+4. **server 包名 ≠ bin 名**：`cargo build -p wb-switch` 报 package not found，包名是 **`wb-switch-server`**（GUI 那侧 package/bin 同名 `wb-switch-rust`）。
+5. **exe 被锁但查不到进程**：`failed to remove wb-switch-rust.exe: os error 5` 且 `Get-Process` 无匹配 → 先 `mv x.exe x.prev.exe`（被映射的 exe 可重命名不可删）→ 重编 → PowerShell `Remove-Item -LiteralPath ... -Force` 清 prev（Bash 的 safe-delete 走 genie-trash 会失败）。
+6. 版本判定只看 `resources/install-manifest.json` 的 `appVersion`；`version` 文件是 Electron 内核版本。
+7. 大仓库 git 写操作不进 2 分钟前台窗口（曾两次损坏 `.git`）；`gc.auto=0` 勿改回；关键节点必须 push。
+8. 编译前停掉运行中的 `wb-switch.exe` / `wb-switch-rust.exe`（Git Bash 下 `MSYS_NO_PATHCONV=1 taskkill /IM ... /F`）。
+9. `.cmd` 必须纯 ASCII + CRLF + 开头 `chcp 65001`。
+10. 账本聚合先按 (账号,日,模型) 汇总日累计再取 max。
+11. Git Bash 下 `$USERPROFILE` 会被 mangled → 用 Python `os.path.expanduser("~")`。
+12. 6004 日志里没有账号字段；长哈希先做「同实体多值」反证再当主键用。
+13. debug tauri 壳走 devUrl:1420 需 vite dev 常驻（release 内嵌 dist）；冷启动 ~53s，`scripts/run-dev.cmd` 轮询 90s + 日志 `target/vite-dev.log`。
+14. **双门只跑 `cargo test -p wb-switch-core`**：`--workspace` 会在 `wb-switch-rust --lib` 报 `STATUS_ENTRYPOINT_NOT_FOUND`(0xc0000139，Tauri 壳 DLL 入口缺失)，是环境限制不是回归。
+15. **oplog 报告结构**：`result.alignData.projects`（不在顶层）；校验 sessions 用完整 UUID 精确 `=`，8 位前缀 LIKE 会混入历史会话。
+16. **预览 dry_run 不跑主题跟随**（会写 leveldb/云端）；真实执行的 `post_close_sync` 才会调 `sync_theme_for_switch`。
 
 ## 下一步
 
-1. ~~**主人真机验证完整切号流程（最高优先）**~~ ✅ **已通过（2026-09-13 01:42 实切 Elaine→廿七）**：补 18 占位会话（DB 18/18 归属/标题/空 JSONL 全对）、续聊实证 = 占位锚点 a42ac423 被点开续聊（WB 首条消息自动重命名标题）、快照防护正常、零异常。详见 `.workbuddy/memory/2026-09-13.md`。
+1. **真机验证今晚三项（最高优先）**：重启 GUI → 开切号弹窗看四项是否默认全勾 → 勾「会话瘦身」点「预览对齐」，确认出现「项目侧栏 / 会话瘦身 / 界面主题」三段 + 项目明细。产物：`target/release/wb-switch-rust.exe`(03:24) 与 `wb-switch.exe`(03:22)。
 2. **上游 #32 监控**：若合并需跟进；本机已用「占位不复制」路线规避。
 3. **解死 hy3 窗口长（下次 hy3 触发时）**：跑 `scripts/analysis/find_6004_events.py`，锚 ≈3h vs 4.5h 二选一定案。
-4. **`model_daily_limit_check.py` 重窗方案重评**：先解释 credit_ledger 14:26:22 边界与滑动窗模型的兼容性，再定检查脚本去留。
-5. ~~WorkBuddy 5.5.6 安装与回归~~ ✅ **全部完成**：appVersion=5.5.6（2026-09-12 装）。回归三项在 5.5.6 上全绿——① 项目侧栏同步 ✓（18 占位）② 设置同步 ✓（claw 2 键 + memory 31KB + myFiles）③ 定时任务迁入 9 条 ✓ ④ **主题跟随 ✓（`settings.theme.cloud`: `theme-tkmw7j` → `dark`）**。本地 leveldb 主题未继承为已知限制（`reason: 未读到当前主题`），非故障。快照留存 `~/.wb-switch/backups/pre-5.5.6-snapshot/`；`pre-5.5.6` tag 已删（装后补打，语义错位）。
-6. issue #30 跟进（vite → 账号发现 → 数据对齐 顺序提 PR，注意 vite 部分需改述为本机环境问题）；H 余额 95% 已用，切号对话框"余额告急+逼近峰值"提醒可做。
+4. **`model_daily_limit_check.py` 重窗方案重评**：先解释 credit_ledger 14:26:22 边界与滑动窗模型的兼容性，再定脚本去留。
+5. **issue #30 顺序提 PR**：vite → 账号发现 → 数据对齐（vite 部分需改述为本机环境问题）。
+6. 切号对话框「余额告急+逼近峰值」提醒（H 余额已用 95%）——可选。
 7. src-tauri devtools feature 保留（诊断用，release 无副作用）——已定，无需处理。
