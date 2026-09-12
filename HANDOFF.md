@@ -1,16 +1,19 @@
 # HANDOFF — workbuddy-switch
 
-> 更新：2026-09-13 凌晨 · 分支 dev · `b946875`
+> 更新：2026-09-13 凌晨 · 分支 dev · `e4597d8`
 > 本阶段：**切号体验收口**——① 对齐项默认全开 ② 复制会话与瘦身的冲突修复 ③ 对齐预览覆盖破坏性操作
+> 状态：**真机验证已通过**（四项默认全勾 + 预览三段齐全），进入收尾
 > 前序（已归档 `docs/PROGRESS.md`）：项目侧栏同步真机验证 · 白屏终局 vite 8.3.0 · 6004 滑动窗口
 
 ## 进度（现在在哪）
 
-- **dev = `b946875`**，已推 origin/dev。本阶段提交链：`abd3920`（默认勾选设置同步+瘦身）→ `0aba0ca`（修 open 时重置为关）→ `1759e33`（瘦身跳过复制体）→ `b946875`（预览覆盖项目侧栏+瘦身）。
+- **dev = `e4597d8`**，已推 origin/dev（03:47 用 `git ls-remote` 核验，`b946875` 之后的收尾归档提交）。本阶段提交链：`abd3920`（默认勾选设置同步+瘦身）→ `0aba0ca`（修 open 时重置为关）→ `1759e33`（瘦身跳过复制体）→ `b946875`（预览覆盖项目侧栏+瘦身）→ `e4597d8`（收尾归档）。
 - 双门基线：`cargo test -p wb-switch-core` **195 绿** + `tsc --noEmit` 0 错（**勿跑 `--workspace`**，见坑位 14）。
 - 四个勾选项**默认全开**：定时任务迁入 / 设置同步 / 同步项目侧栏 / 会话瘦身；「会话归属对齐」UI 已下线（代码保留）。
 - 切号执行顺序（**不可随意调**，switch.rs:163→168）：`close_workbuddy → copy_sessions（上游）→ align_data（迁入/设置同步/主题）→ sync_project_set（项目侧栏）→ slim_sessions（瘦身）`。
-- **待主人真机验证**：重编的 GUI（03:24）与 server（03:22）——① 弹窗四项默认全勾 ② 点「预览对齐」应出现「项目侧栏 / 会话瘦身 / 界面主题」三段及明细。
+- **真机验证 2026-09-13 03:41 通过**（主人实测）：四项默认全勾 ✔；预览出现「项目侧栏 / 会话瘦身 / 界面主题」三段 + 明细 ✔；尾注「本次复制的对话会被跳过」✔。
+  - 实测预览值：自动化归属 9 条待对齐 · settings 已一致 · storage 待复制 1 · 画像缓存待对齐 · my-files 4 份待更新 4 · 项目侧栏 0/0（已同步）· 瘦身每项目留 1 条待删 15 条（涉及 6 个项目）。
+  - 结论：三段渲染与 dry_run 统计均正确，无回归。
 
 ## 决策（为什么这样做）
 
@@ -42,10 +45,19 @@
 
 ## 下一步
 
-1. **真机验证今晚三项（最高优先）**：重启 GUI → 开切号弹窗看四项是否默认全勾 → 勾「会话瘦身」点「预览对齐」，确认出现「项目侧栏 / 会话瘦身 / 界面主题」三段 + 项目明细。产物：`target/release/wb-switch-rust.exe`(03:24) 与 `wb-switch.exe`(03:22)。
-2. **上游 #32 监控**：若合并需跟进；本机已用「占位不复制」路线规避。
-3. **解死 hy3 窗口长（下次 hy3 触发时）**：跑 `scripts/analysis/find_6004_events.py`，锚 ≈3h vs 4.5h 二选一定案。
-4. **`model_daily_limit_check.py` 重窗方案重评**：先解释 credit_ledger 14:26:22 边界与滑动窗模型的兼容性，再定脚本去留。
-5. **issue #30 顺序提 PR**：vite → 账号发现 → 数据对齐（vite 部分需改述为本机环境问题）。
-6. 切号对话框「余额告急+逼近峰值」提醒（H 余额已用 95%）——可选。
+1. ~~真机验证三项~~ **已完成（03:41 通过）**，见「进度」段。
+2. ~~push origin dev 核验~~ **已核验（03:47）**：`git ls-remote origin dev` = `e4597d8` = 本地 HEAD，**已推送，无待推提交**。注：沙箱内 `git rev-list origin/dev..HEAD` 报 128 是**本地缺 `origin/dev` ref**（未 fetch）导致的假象，不是未推送——判定推送状态用 `git ls-remote`，别用 rev-list。
+3. **上游 #32 监控**：若合并需跟进；本机已用「占位不复制」路线规避。
+4. **解死 hy3 窗口长（下次 hy3 触发时）**：跑 `scripts/analysis/find_6004_events.py`，锚 ≈3h vs 4.5h 二选一定案。
+5. **`model_daily_limit_check.py` 重窗方案重评**：先解释 credit_ledger 14:26:22 边界与滑动窗模型的兼容性，再定脚本去留。
+6. **issue #30 顺序提 PR**：vite → 账号发现 → 数据对齐（vite 部分需改述为本机环境问题）。
+7. 切号对话框「余额告急+逼近峰值」提醒（H 余额已用 95%）——可选。
+8. ~~瘦身保留数可配化~~ **决定不做**（主人 03:47）：`slimKeep` 保持硬编码 `slimSessions ? 1 : 0`，理由是软删可恢复 + 每项目留 1 条符合「占位不复制」路线。勿再提。
+9. ~~【优化面盘点 03:51】新增功能 5 个优化点~~ **已全部实施（04:0x，198 绿 + tsc 0 错，GUI/server 已重编）**：
+   - **A（预览漏报主题，一致性）已修**：真实执行无条件跑 `sync_theme_for_switch`，预览原只在 `opts.align_files` 时给 `theme.planned` → 关掉「设置同步」时预览不提主题，实际却切。改为**预览无条件给 `planned`**（忠于"预览如实反映将发生什么"，零行为变更，不动已验证过的主题跟随逻辑）。
+   - **B（同秒备份互相覆盖，数据安全）**：`config.rs:555` `utc_iso()` 只到秒；`projects_anchor.rs:398` 与 `:420` 在 `append_project_and_slim` 里连续调用各做一次 `backup_workbuddy_db(<ts>)` → 同一秒目录名相同 → 后一次覆盖前一次 → **pre-项目侧栏同步的快照被 pre-瘦身快照覆盖丢失**（DB 仅 0.68MB，两次都落在同一秒内概率高）。**已修**：新增 `backup_stamp()`（秒级 `utc_iso()` + 毫秒），两处备份目录不再重名，pre-同步快照不再被覆盖。
+   - **C（预览瘦身数偏大）已修**：`preview_sync` 新增 `copy_session_ids` 参数（switch.rs 预览分支传 `opts.copy_session_ids`），经 `session_cwds()` 查 cwd，与 `slim.groups` 求交，输出 `slim.copyPlanned{total,hitCount,hitProjects}`；前端文案由「删除数可能更少」升级为「本次复制的 N 条会被跳过，其中 K 条落在上述 M 个瘦身项目」。匹配逻辑抽纯函数 `copy_hits()` 并带单测。
+   - **D（传参隐患）已修**：`append_project_and_slim` 去掉独立 `dry_run` 参数，统一读 `opts.dry_run`；`preview_sync`/`post_close_sync` 先把 `dry_run` 写进 opts 克隆再传入，杜绝两处不一致。
+   - **E（重复代码）已修**：抽 `run_switch_sync(target_acc, opts, protected_ids, copy_session_ids)`，两入口只留主题分歧；五项短路条件抽 `AlignOptions::any_enabled()`。
+10. **沙箱 git 视图坑（新增）**：沙箱内 `git fetch` 会打印 `[new branch] dev -> origin/dev` 但**本地 refs 实际不落盘**（下一条 `git branch -r` 看不到）。→ 判定是否已推只用 `git ls-remote <remote> <branch>`；`git rev-list origin/dev..HEAD` 报 128 是假象，不是未推送。
 7. src-tauri devtools feature 保留（诊断用，release 无副作用）——已定，无需处理。

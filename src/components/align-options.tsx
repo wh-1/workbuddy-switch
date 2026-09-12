@@ -151,7 +151,14 @@ export function formatAlignReport(r: AlignDataReport): string[] {
         .join("、");
       lines.push(`　涉及：${names}${gs.length > 3 ? ` 等 ${gs.length} 个项目` : ""}`);
     }
-    if (r.dryRun) lines.push("　实际执行时本次复制的对话会被跳过，删除数可能更少");
+    if (r.dryRun) {
+      const cp = r.slim.copyPlanned;
+      lines.push(
+        cp && cp.total > 0
+          ? `　实际执行时本次复制的 ${cp.total} 条会被跳过，其中 ${cp.hitCount} 条落在上述 ${cp.hitProjects} 个瘦身项目，实际删除数更少`
+          : "　实际执行时本次复制的对话会被跳过，删除数可能更少",
+      );
+    }
   }
   lines.push(r.dryRun ? "以上为预览结果，尚未落盘" : "对齐完成（已先备份 db 与 settings）");
   return lines;

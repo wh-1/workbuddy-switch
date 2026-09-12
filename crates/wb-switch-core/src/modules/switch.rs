@@ -159,9 +159,11 @@ fn switch_account_inner(
             slim_keep: opts.slim_keep,
             dry_run: true,
         };
-        let align_data = align::preview_sync(&acc, &align_opts).unwrap_or_else(|| {
-            json!({ "dryRun": true, "noop": true, "targetUid": align::account_uid(&acc) })
-        });
+        // 预览不真复制，但把「将要复制的会话」传进去，用于量化瘦身的抵消条数。
+        let align_data = align::preview_sync(&acc, &align_opts, &opts.copy_session_ids)
+            .unwrap_or_else(|| {
+                json!({ "dryRun": true, "noop": true, "targetUid": align::account_uid(&acc) })
+            });
         return Ok(json!({
             "ok": true,
             "dryRun": true,

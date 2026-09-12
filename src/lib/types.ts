@@ -162,6 +162,11 @@ export interface AlignDataReport {
     excluded?: number;
     /** 每个项目将被删除的条数。 */
     groups?: { cwd: string; count: number }[];
+    /**
+     * 仅预览：本次将复制的会话对瘦身的抵消。
+     * 预览不真复制，复制体拿不到新 id、进不了保护名单，`planned` 偏大，故给此量化提示。
+     */
+    copyPlanned?: { total: number; hitCount: number; hitProjects: number };
     error?: string;
   };
 }

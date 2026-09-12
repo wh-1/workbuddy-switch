@@ -9,6 +9,7 @@
 //! - dry_run：只统计将要发生的变更，不落盘、不关 App、不写凭据
 
 use serde_json::{json, Map, Value};
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -59,6 +60,17 @@ pub struct AlignOptions {
     /// 会话瘦身：每项目保留最近 N 条存活会话（0 或缺省 = 关闭）。
     pub slim_keep: i64,
     pub dry_run: bool,
+}
+
+impl AlignOptions {
+    /// 是否有任一对齐项开启（全关时整个对齐流程跳过）。
+    fn any_enabled(&self) -> bool {
+        self.align_automations
+            || self.align_sessions
+            || self.align_files
+            || self.sync_projects
+            || self.slim_keep > 0
+    }
 }
 
 fn workbuddy_root() -> PathBuf {
@@ -649,18 +661,23 @@ pub fn align_data(target_uid: &str, source_uid: Option<&str>, opts: &AlignOption
 /// 项目侧栏同步 + 会话瘦身，追加进报告（真实执行与预览共用）。
 ///
 /// 顺序固定：先补占位/删多余，再瘦身（占位行也纳入瘦身统计）。
+/// `dry_run` 只从 `opts.dry_run` 读——不再另收一个可能与之矛盾的独立参数。
 /// `protected_ids` = 本次复制体，瘦身时跳过（不删、也不占保留名额）。
 fn append_project_and_slim(
     report: &mut Value,
     target_uid: &str,
     source_uid: Option<&str>,
     opts: &AlignOptions,
-    dry_run: bool,
     protected_ids: &[String],
 ) {
     if opts.sync_projects {
         if let Some(src) = source_uid {
-            match crate::modules::projects_anchor::sync_project_set(src, target_uid, dry_run, false) {
+            match crate::modules::projects_anchor::sync_project_set(
+                src,
+                target_uid,
+                opts.dry_run,
+                false,
+            ) {
                 Ok(r) => report["projects"] = r,
                 Err(e) => report["projects"] = json!({ "error": e }),
             }
@@ -670,7 +687,7 @@ fn append_project_and_slim(
         match crate::modules::projects_anchor::slim_sessions(
             target_uid,
             opts.slim_keep,
-            dry_run,
+            opts.dry_run,
             protected_ids,
         ) {
             Ok(r) => report["slim"] = r,
@@ -679,71 +696,96 @@ fn append_project_and_slim(
     }
 }
 
-/// 切号预览（dry_run）：统计「对齐 + 项目侧栏 + 会话瘦身」将发生的变更。
-///
-/// 与 [`post_close_sync`] 的区别：**不写库、不写快照、不写云端**。
-/// 主题跟随只给出提示占位——`sync_theme_for_switch` 会写 leveldb 与云端主题，
-/// 预览阶段绝不能调用。
-pub fn preview_sync(target_acc: &Value, opts: &AlignOptions) -> Option<Value> {
-    let target_uid = account_uid(target_acc);
-    if target_uid.is_empty()
-        || !(opts.align_automations || opts.align_sessions || opts.align_files || opts.sync_projects || opts.slim_keep > 0)
-    {
-        return None;
+/// 只读取一批会话的 cwd（预览阶段估算复制体落点用，查不到就忽略）。
+fn session_cwds(ids: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    let Some(conn) = open_db(&workbuddy_db_path(), true) else {
+        return out;
+    };
+    for id in ids {
+        if let Ok(Some(c)) = conn.query_row(
+            "SELECT cwd FROM sessions WHERE id = ?1",
+            [id.as_str()],
+            |r| r.get::<_, Option<String>>(0),
+        ) {
+            if !c.is_empty() {
+                out.push(c);
+            }
+        }
     }
-    let source_uid = crate::modules::session::current_user_uid();
-    let mut dry_opts = opts.clone();
-    dry_opts.dry_run = true;
-    let mut report = align_data(&target_uid, source_uid.as_deref(), &dry_opts);
-    report["dryRun"] = json!(true);
-
-    append_project_and_slim(
-        &mut report,
-        &target_uid,
-        source_uid.as_deref(),
-        opts,
-        true,
-        &[], // 预览不复制，无保护名单；真实执行时会跳过复制体，实际删除数可能更少
-    );
-
-    if opts.align_files {
-        report["settings"]["theme"] = json!({ "planned": true });
-    }
-    Some(report)
+    out
 }
 
-/// 切号「关进程之后」的数据后置同步：归属/文件对齐 + 界面主题跟随。
+/// 预览专用：量化「本次将复制的会话」对瘦身的抵消。
 ///
-/// 从 `switch.rs` 内联块下沉到这里（本地专属文件），使 switch.rs 的本地改动保持最小。
-/// 返回 `align_report`；主题跟随（原独立 theme_report）已并入报告的 `settings.theme`
-/// 子项——主题即账号外观设置，归入「设置同步」呈现（2026-09-12 定稿）。
-/// `protected_ids` = 本次切号刚复制到目标账号的会话 id：瘦身时必须跳过，
-/// 否则「复制多条同项目会话 + 瘦身」会让复制体互相挤掉，用户只看到 1 条。
-pub fn post_close_sync(
+/// 预览不执行复制，拿不到复制体的新 id，无法把它们放进保护名单，所以 `planned`
+/// 偏大。这里按 cwd 把复制体对齐到瘦身项目上，给出「将复制几条 / 命中几个瘦身项目」，
+/// 替代原来「删除数可能更少」的模糊提示。
+fn annotate_copy_impact(report: &mut Value, copy_session_ids: &[String]) {
+    if copy_session_ids.is_empty() {
+        return;
+    }
+    let cwds = session_cwds(copy_session_ids);
+    let slimmed: BTreeSet<&str> = report["slim"]["groups"]
+        .as_array()
+        .map(|gs| gs.iter().filter_map(|g| g["cwd"].as_str()).collect())
+        .unwrap_or_default();
+    let (hit_count, hit_projects) = copy_hits(&slimmed, &cwds);
+    report["slim"]["copyPlanned"] = json!({
+        "total": copy_session_ids.len(),
+        "hitCount": hit_count,
+        "hitProjects": hit_projects,
+    });
+}
+
+/// 纯函数：复制体 cwd 与瘦身项目的交集 → (命中会话条数, 命中项目数)。
+fn copy_hits(slimmed: &BTreeSet<&str>, cwds: &[String]) -> (usize, usize) {
+    let mut projects: BTreeSet<&str> = BTreeSet::new();
+    let mut count = 0usize;
+    for c in cwds {
+        if slimmed.contains(c.as_str()) {
+            count += 1;
+            projects.insert(c.as_str());
+        }
+    }
+    (count, projects.len())
+}
+
+/// 切号对齐的统一入口：预览（`opts.dry_run=true`）与真实执行（false）共用。
+///
+/// 两者唯一分歧在主题：真实执行调用 `sync_theme_for_switch`（写 leveldb + 云端，
+/// 预览绝不能调），预览只给 `planned` 占位——**且无条件给**，因为真实执行同样
+/// 是无条件的，否则关掉「设置同步」时预览会漏报主题变更。
+///
+/// `protected_ids` = 真实执行时本次复制出来的会话 id（预览为空）。
+/// `copy_session_ids` = 预览时将要复制的源会话 id（真实执行为空，已计入 protected_ids）。
+fn run_switch_sync(
     target_acc: &Value,
     opts: &AlignOptions,
     protected_ids: &[String],
+    copy_session_ids: &[String],
 ) -> Option<Value> {
     let target_uid = account_uid(target_acc);
-    if target_uid.is_empty()
-        || !(opts.align_automations || opts.align_sessions || opts.align_files || opts.sync_projects || opts.slim_keep > 0)
-    {
+    if target_uid.is_empty() || !opts.any_enabled() {
         return None;
     }
     let source_uid = crate::modules::session::current_user_uid();
-    let mut full_opts = opts.clone();
-    full_opts.dry_run = false;
-    let mut report = align_data(&target_uid, source_uid.as_deref(), &full_opts);
+    let mut report = align_data(&target_uid, source_uid.as_deref(), opts);
 
-    // 项目侧栏同步 + 会话瘦身（真实执行与预览共用，见 append_project_and_slim）。
     append_project_and_slim(
         &mut report,
         &target_uid,
         source_uid.as_deref(),
         opts,
-        false,
         protected_ids,
     );
+
+    if opts.dry_run {
+        report["dryRun"] = json!(true);
+        annotate_copy_impact(&mut report, copy_session_ids);
+        report["settings"]["theme"] = json!({ "planned": true });
+        return Some(report);
+    }
 
     // 主题跟随账号：本地继承（leveldb 注入，启动瞬间生效）+ 云端继承
     // （把 target 的云端外观选择改成 source 的值，根治回跳）。并入「设置同步」。
@@ -765,11 +807,83 @@ pub fn post_close_sync(
     Some(report)
 }
 
+/// 切号预览（dry_run）：统计「对齐 + 项目侧栏 + 会话瘦身」将发生的变更。
+///
+/// 与 [`post_close_sync`] 的区别：**不写库、不写快照、不写云端**。
+/// `copy_session_ids` = 本次勾选要复制的会话（预览不真复制，只用于估算瘦身抵消）。
+pub fn preview_sync(
+    target_acc: &Value,
+    opts: &AlignOptions,
+    copy_session_ids: &[String],
+) -> Option<Value> {
+    let mut dry_opts = opts.clone();
+    dry_opts.dry_run = true;
+    run_switch_sync(target_acc, &dry_opts, &[], copy_session_ids)
+}
+
+/// 切号「关进程之后」的数据后置同步：归属/文件对齐 + 界面主题跟随。
+///
+/// 从 `switch.rs` 内联块下沉到这里（本地专属文件），使 switch.rs 的本地改动保持最小。
+/// 返回 `align_report`；主题跟随（原独立 theme_report）已并入报告的 `settings.theme`
+/// 子项——主题即账号外观设置，归入「设置同步」呈现（2026-09-12 定稿）。
+/// `protected_ids` = 本次切号刚复制到目标账号的会话 id：瘦身时必须跳过，
+/// 否则「复制多条同项目会话 + 瘦身」会让复制体互相挤掉，用户只看到 1 条。
+pub fn post_close_sync(
+    target_acc: &Value,
+    opts: &AlignOptions,
+    protected_ids: &[String],
+) -> Option<Value> {
+    let mut full_opts = opts.clone();
+    full_opts.dry_run = false;
+    run_switch_sync(target_acc, &full_opts, protected_ids, &[])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use rusqlite::Connection;
     use std::path::PathBuf;
+
+    /// 五个开关任一开启即视为需要对齐（全关时整个流程跳过）。
+    #[test]
+    fn any_enabled_covers_all_five_switches() {
+        let mut o = AlignOptions::default();
+        assert!(!o.any_enabled(), "全关时应跳过对齐");
+        o.align_automations = true;
+        assert!(o.any_enabled());
+        o = AlignOptions::default();
+        o.align_sessions = true;
+        assert!(o.any_enabled());
+        o = AlignOptions::default();
+        o.align_files = true;
+        assert!(o.any_enabled());
+        o = AlignOptions::default();
+        o.sync_projects = true;
+        assert!(o.any_enabled());
+        o = AlignOptions::default();
+        o.slim_keep = 1;
+        assert!(o.any_enabled(), "slim_keep>0 也算开启");
+        o.slim_keep = 0;
+        assert!(!o.any_enabled());
+    }
+
+    /// 复制体与瘦身项目的交集：条数按会话计，项目数按 cwd 去重。
+    #[test]
+    fn copy_hits_counts_sessions_and_distinct_projects() {
+        let slimmed: BTreeSet<&str> = ["/p/a", "/p/b"].into_iter().collect();
+        let cwds = vec![
+            "/p/a".to_string(),
+            "/p/a".to_string(),
+            "/p/c".to_string(),
+        ];
+        assert_eq!(copy_hits(&slimmed, &cwds), (2, 1));
+
+        let none: Vec<String> = vec![];
+        assert_eq!(copy_hits(&slimmed, &none), (0, 0));
+
+        let both = vec!["/p/a".to_string(), "/p/b".to_string()];
+        assert_eq!(copy_hits(&slimmed, &both), (2, 2));
+    }
 
     fn temp_db(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(

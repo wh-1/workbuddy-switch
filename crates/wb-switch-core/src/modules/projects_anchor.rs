@@ -393,10 +393,18 @@ pub(crate) fn slim_sessions_in_db(
     }))
 }
 
+/// 备份目录时间戳：毫秒级。
+///
+/// 不能用 `utc_iso()`（只到秒）——一次切号里项目侧栏同步与会话瘦身会连续各备份一次，
+/// 秒级目录名重名导致后一次覆盖前一次，**pre-同步的快照丢失**，回滚点被后移。
+fn backup_stamp() -> String {
+    format!("{}-{}Z", utc_iso().trim_end_matches('Z'), now_ms())
+}
+
 /// 真实路径包装：同步项目侧栏（含 db 备份）。
 pub fn sync_project_set(src_uid: &str, dst_uid: &str, dry_run: bool, force: bool) -> Result<Value, String> {
     if !dry_run {
-        let root = backup_dir().join("projects_anchor").join(utc_iso());
+        let root = backup_dir().join("projects_anchor").join(backup_stamp());
         backup_workbuddy_db(&root);
     }
     sync_project_set_in_db(
@@ -418,7 +426,7 @@ pub fn slim_sessions(
     exclude: &[String],
 ) -> Result<Value, String> {
     if !dry_run {
-        let root = backup_dir().join("projects_anchor").join(utc_iso());
+        let root = backup_dir().join("projects_anchor").join(backup_stamp());
         backup_workbuddy_db(&root);
     }
     slim_sessions_in_db(&workbuddy_db_path(), uid, keep, dry_run, exclude)
@@ -428,6 +436,21 @@ pub fn slim_sessions(
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    /// 备份戳必须带毫秒：一次切号内连续两次备份若重名，后一次会覆盖前一次的快照。
+    #[test]
+    fn backup_stamp_is_unique_per_millisecond() {
+        let a = backup_stamp();
+        assert!(a.ends_with('Z'), "保持与 utc_iso 一致的 Z 后缀: {a}");
+        let sec_len = "2026-09-13T20-04-43Z".len();
+        assert!(a.len() > sec_len, "毫秒后缀不能丢: {a}");
+        // 连续两次至少不因「格式不含毫秒」而重名
+        let millis = a.trim_end_matches('Z').rsplit('-').next().unwrap_or("");
+        assert!(
+            millis.chars().all(|c| c.is_ascii_digit()) && millis.len() >= 12,
+            "毫秒段应为 now_ms 的数值: {a}"
+        );
+    }
 
     fn temp_db(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
