@@ -102,29 +102,42 @@ def main() -> int:
 
     print(f"检查日期：{today}"
           + ("  （基线首次运行，已从账本全史播种）" if seeded else ""))
-    print(f"{'模型':<22}{'今日用量(各账号)':<34}{'峰值基线':>10}  状态")
-    print("-" * 92)
 
-    updated = False
+    # 已知账号（含今日有活动的），保证每个账号一行
+    accounts = sorted(set(NAMES.values()) | {a for (_, a) in today_acc})
+
+    # 逐模型检查并更新基线（今日跨账号最大值 > 基线峰值 → 更新）
+    updated = {}
     for m in TARGET_MODELS:
-        accs = [a for (mm, a) in today_acc if mm == m]
-        parts = " ".join(f"{a}={today_acc[(m, a)]:.1f}" for a in sorted(accs)) or "（无）"
-        today_max = max((today_acc[(m, a)] for a in accs), default=0.0)
-        base = baseline.get(m, {"peak": 0.0, "date": "-", "account": "-"})
-        peak = base.get("peak", 0.0)
-        pct = (today_max / peak * 100) if peak > 0 else 0.0
-        if today_max > peak:
-            baseline[m] = {"peak": today_max, "date": today, "account": max(accs, key=lambda a: today_acc[(m, a)])}
-            status = f"⚠️ 超峰值 → 基线已更新为 {today_max:.1f} ({today}, {baseline[m]['account']})"
-            updated = True
-        else:
-            status = f"正常 ({pct:.1f}%)"
-        print(f"{m:<22}{parts:<34}{peak:>10.1f}  {status}")
+        top_acc = max(accounts, key=lambda a: today_acc.get((m, a), 0.0))
+        val = today_acc.get((m, top_acc), 0.0)
+        if val > baseline.get(m, {}).get("peak", 0.0):
+            baseline[m] = {"peak": val, "date": today, "account": top_acc}
+            updated[m] = top_acc
+
+    # 表格：首行=基线，其后每行=一个账号
+    c0, c1, c2, c3 = 8, 26, 26, 10
+    print(f"{'账号':<{c0}}{TARGET_MODELS[0]:<{c1}}{TARGET_MODELS[1]:<{c2}}状态")
+    print("-" * (c0 + c1 + c2 + c3))
+    p0 = baseline.get(TARGET_MODELS[0], {}).get("peak", 0.0)
+    p1 = baseline.get(TARGET_MODELS[1], {}).get("peak", 0.0)
+    base_status = "已更新" if updated else "未变"
+    print(f"{'基线':<{c0}}{p0:<{c1}.1f}{p1:<{c2}.1f}{base_status:>{c3}}")
+    for a in accounts:
+        v0 = today_acc.get((TARGET_MODELS[0], a), 0.0)
+        v1 = today_acc.get((TARGET_MODELS[1], a), 0.0)
+        r0 = f"{v0:.1f} ({v0 / p0 * 100:.1f}%)" if p0 else f"{v0:.1f}"
+        r1 = f"{v1:.1f} ({v1 / p1 * 100:.1f}%)" if p1 else f"{v1:.1f}"
+        status = "超峰值" if a in updated.values() else "正常"
+        print(f"{a:<{c0}}{r0:<{c1}}{r1:<{c2}}{status:>{c3}}")
 
     if updated:
-        print(f"\n基线已更新并写入：{BASELINE}")
+        print("\n⚠️ 超峰值，基线已更新：")
+        for m, a in updated.items():
+            print(f"  {m} → {baseline[m]['peak']:.1f} ({today}, {a})")
     else:
-        print(f"\n基线未变，已写入：{BASELINE}")
+        print("\n基线未变。")
+    print(f"基线文件：{BASELINE}")
     with open(BASELINE, "w", encoding="utf-8") as fh:
         json.dump(baseline, fh, ensure_ascii=False, indent=2)
     return 0
