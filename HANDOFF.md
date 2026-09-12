@@ -1,14 +1,14 @@
 # HANDOFF — workbuddy-switch
 
-> 更新：2026-09-13 凌晨 · 分支 dev · `25ab168`
-> 本阶段：**① 项目侧栏同步 + 会话瘦身落地**（切号不复制会话，占位锚点替代上游复制路线）
-> ② **白屏终局破案**——vite 8.3.0 rolldown 内核根治 rollup 双 React 实例，主人真机确认修复
-> 6004 滑动窗口结论已归档 `docs/PROGRESS.md`（2026-09-12 节）
+> 更新：2026-09-13 凌晨 · 分支 dev · `6f68c39`
+> 本阶段：**① 项目侧栏同步真机验证通过**（01:42 实切补 18 占位锚点，续聊实证）② **WorkBuddy 5.5.6 回归全绿**（含主题跟随）
+> 前序（2026-09-12）：项目侧栏同步+会话瘦身落地 · 白屏终局 vite 8.3.0 · 6004 滑动窗口 —— 均已归档 `docs/PROGRESS.md`
 
 ## 进度（现在在哪）
 
-- **dev = `25ab168`**，已推 origin/dev。本阶段提交链：`b67e8bd`（对齐排除软删）→ `115daef`（项目侧栏同步+会话瘦身+命名改造）→ `8c46a68`（run-dev 轮询）→ `c1884fb`（关 minify）→ `49182b1`（vite 8.3.0 终局修复）→ `25ab168`（PROGRESS 归档）。
-- 双门基线：cargo 194 测试绿 + tsc 0 错；release 双 exe（wb-switch / wb-switch-rust）主人真机验证通过。
+- **dev = `6f68c39`**，已推 origin/dev。本阶段提交链：`49182b1`（vite 8.3.0 终局修复）→ `25ab168`（PROGRESS 归档）→ `19e3ccb`（HANDOFF 更新）→ `0429bb3`（验证销账）→ `6f68c39`（5.5.6 事实修正）+ 收尾提交。
+- 双门基线：`cargo test -p wb-switch-core` 194 绿 + tsc 0 错（**勿跑 `--workspace`**，见坑位 14）；release 双 exe 主人真机验证通过。
+- **本阶段无代码改动**：纯验证 + 文档销账，功能闭环。
 - **项目侧栏同步（`crates/wb-switch-core/src/modules/projects_anchor.rs`，本地专属零冲突）**：
   - `sync_project_set_in_db`：切号后以上个账号项目清单（cwd 集合）为准——少的补（INSERT 占位会话 + 空 JSONL）、多的删（软删）；快照 `~/.wb-switch/project_set_snapshot.json` 级联防护（清单清零/骤减 30% 中断，force 放行）。
   - `slim_sessions_in_db`：每 cwd 保留 updated_at 最新 N 条（soft delete）。
@@ -40,6 +40,8 @@
 11. **6004 日志里没有账号字段**；长哈希先做"同实体多值"反证再当主键用。
 12. **debug tauri 壳走 devUrl:1420 需 vite dev 常驻**（release 才内嵌 dist）；vite 冷启动 ~53s，`scripts/run-dev.cmd` v2 已改轮询 90s + 日志落 `target/vite-dev.log`。
 13. WebView2 缓存目录 `%LOCALAPPDATA%\com.wbswitch.app\EBWebView`——清缓存不能解代码问题（排查时可排除但别指望它修）。
+14. **双门只看 `cargo test -p wb-switch-core`（194 绿）**，别跑 `--workspace`：`wb-switch-rust --lib` 测试二进制启动即 `STATUS_ENTRYPOINT_NOT_FOUND`(0xc0000139，Tauri 壳 DLL 入口缺失)，是运行期环境限制不是回归，会误判为失败。
+15. **oplog 报告结构**：`result.alignData.projects`（不在顶层）；校验 sessions 须用完整 UUID 精确 `=`——8 位前缀 LIKE 会把别的历史会话混进来。
 
 ## 下一步
 
@@ -47,6 +49,6 @@
 2. **上游 #32 监控**：若合并需跟进；本机已用「占位不复制」路线规避。
 3. **解死 hy3 窗口长（下次 hy3 触发时）**：跑 `scripts/analysis/find_6004_events.py`，锚 ≈3h vs 4.5h 二选一定案。
 4. **`model_daily_limit_check.py` 重窗方案重评**：先解释 credit_ledger 14:26:22 边界与滑动窗模型的兼容性，再定检查脚本去留。
-5. ~~安装 WorkBuddy **5.5.6**~~ ✅ **已装（2026-09-12，实测 `resources/install-manifest.json` appVersion=5.5.6）**。装后回归：**01:42 实切验证即在 5.5.6 环境完成** → 项目侧栏同步 ✓ / 设置同步 ✓ / 定时任务迁入 9 条 ✓；**仅剩主题跟随（L6）待主人肉眼确认**。打点：`pre-5.5.6` tag = `0429bb3`（注：标签是装后补打的，语义应为「5.5.6 回归基线」）+ `~/.wb-switch/backups/pre-5.5.6-snapshot/` 4 文件快照。
+5. ~~WorkBuddy 5.5.6 安装与回归~~ ✅ **全部完成**：appVersion=5.5.6（2026-09-12 装）。回归三项在 5.5.6 上全绿——① 项目侧栏同步 ✓（18 占位）② 设置同步 ✓（claw 2 键 + memory 31KB + myFiles）③ 定时任务迁入 9 条 ✓ ④ **主题跟随 ✓（`settings.theme.cloud`: `theme-tkmw7j` → `dark`）**。本地 leveldb 主题未继承为已知限制（`reason: 未读到当前主题`），非故障。快照留存 `~/.wb-switch/backups/pre-5.5.6-snapshot/`；`pre-5.5.6` tag 已删（装后补打，语义错位）。
 6. issue #30 跟进（vite → 账号发现 → 数据对齐 顺序提 PR，注意 vite 部分需改述为本机环境问题）；H 余额 95% 已用，切号对话框"余额告急+逼近峰值"提醒可做。
 7. src-tauri devtools feature 保留（诊断用，release 无副作用）——已定，无需处理。

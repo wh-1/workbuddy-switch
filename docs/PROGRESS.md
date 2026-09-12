@@ -96,3 +96,13 @@
 - 配套防御（49182b1）：react/react-dom/vite pin 精确版本；vite.config minify:false + react 正则 alias（对象形式 `react:` 前缀会劫持 react/jsx-runtime → 必须正则数组）+ commonjsOptions strictRequires；tauri 加 devtools feature（真机 console 诊断）。
 - 排查方法论：alias 修复曾假阳性——esbuild minify 改名骗过 `var react_production` 计数（零命中是改名了）→ **验证产物要看 import 结构，不看变量名计数**；「dev 正常 vs build 崩」对照直接锁死构建环节；WebView2 缓存（EBWebView，已备份清理）与代码问题无关。
 - 上游官方无此问题：Linux CI 大小写敏感文件系统行为不同。dev 正常/release exe（wb-switch.exe 01:29 / wb-switch-rust.exe 01:30 构建）均验证通过。
+
+## 2026-09-13 项目侧栏同步真机验证通过 + WorkBuddy 5.5.6 回归全绿
+
+- **实切验证（01:42 Elaine→廿七，勾「同步项目侧栏」）**：补 **18 条占位会话**（Elaine 19 项目 − 廿七已有 1），removed 0、slim 0；同次执行设置同步（claw 2 键 + memory 31KB + myFiles）与定时任务迁入 9 条。
+- **DB 层 18/18 全对**：title「（项目锚点）」、user_id 全为廿七(8d82e068)、零软删、JSONL 空文件、status=completed；workspace 目录名实测 `d-w-dev-stock-bugu`（与 `workspace_dir_name` 规则吻合）。
+- **可续聊实证 = 会话本身**：占位锚点 `a42ac423`（D:\w-dev\wb\workbuddy-switch）被点开续聊（首条 01:47:24），WB 用首条消息自动重命名标题「读取存档继续游戏」；bugu 锚点 `45a718aa` 01:50 同样续聊成功。→ **锚点续聊后由 WB 自动重命名是正常行为，非缺陷**。
+- **5.5.6 回归三项全绿**（appVersion 实测 5.5.6，2026-09-12 已装，非本次装）：项目侧栏同步 ✓ / 设置同步 ✓ / 定时任务迁入 ✓ / **主题跟随 ✓（`settings.theme.cloud`: `theme-tkmw7j` → `dark`）**。本地 leveldb 主题未继承为已知限制（`reason: 未读到当前主题`）。
+- 上游 #32 复核：仍 open、维护者零响应，本机「占位不复制」路线规避充分，继续被动监控。
+- 坑位补记：oplog 报告结构是 `result.alignData.projects`（非顶层 `projects`）；sessions 校验须用完整 UUID 精确 `=`，8 位前缀 LIKE 会误判。
+- 双门：`cargo test -p wb-switch-core` 194 绿 + tsc 0 错；dev 推至 `6f68c39`。**`cargo test --workspace` 不可用**：`wb-switch-rust --lib` 测试二进制启动即 `STATUS_ENTRYPOINT_NOT_FOUND`(0xc0000139，DLL 入口缺失)，属 Tauri 壳 crate 运行期环境限制，与代码无关。
