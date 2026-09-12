@@ -58,3 +58,12 @@
 - **实测（近 30 天）**：58 个对话 · Total 1.70B · 调用 8,563 次 · 命中率 96.0% · 积分 1,616.23（仅 13 个对话有记账）。全量：71 对话 · 1.81B · 9,695 次 · 95.9% · 2,592.08（20 个对话有记账）。**最烧对话**：daily_stock_analysis「对比方案设计」214.65M / 97.0%（积分 0，走免费额度）。
 - **结论**：「积分不够」非当前瓶颈 —— 免费/套餐内额度不产生积分记账，近 30 天 87% 请求积分为 0 属正常。
 
+## 2026-09-12 积分可视化与用量监控（续三连突破）
+
+- **HANDOFF 下一步 1 完成（折线图）**：新增 `scripts/analysis/generate_ledger_charts.py` 读 `credit_ledger/*.jsonl` 官方明细，输出 `reports/credit_ledger_charts.html`（4 张纯 SVG 零依赖）：每账号一张（每线=一模型，X=日，Y=当日扣分）+ 三账号每日总扣分对比。数据对齐全景 17,184 积分（H 7,832 / Harvey 6,248 / Elaine 3,104）。commit `1788d89`。
+- **每模型单日最高用量表**：`reports/model_max_daily.md`（跨账号取最多的一天）。口径 = max over (账号×天) 的当日扣分，是「每天一个模型最多能用多少分」的唯一可靠口径。峰值：ds-v4-flash 1297.1 / glm-5.3-flash 806.1 / ds-v4.1-flash 719.1 / glm-5.2-x 541.5 / glm-5.3 374.2 / glm-5.2 360.6 / minimax-m3 129.6 / 其余 <130；hy3 恒 0（0.00x 免费）。
+- **限额监控启发式被否（决策）**：原计划「某日某模型 credit 突停+换模型=触顶禁用」不可靠 —— 账本是账单不含换模型原因，且被三种情况污染：①没到量主动换 ②并行多任务多模型（H 09-10 单日同跑 ds-v4.1-flash719+glm-5.3374+minimax-m3130）③免费模型 hy3 credit 恒 0 信号失效。→ 峰值表作唯一可靠基线；若产品化只能用「同日 plateau+其他模型仍活跃」软信号且标疑似、排除免费模型。
+- **手动用量检查器（主人要求，不接入页面）**：`scripts/analysis/model_daily_limit_check.py` 只盯 deepseek-v4.1-flash / glm-5.3-flash，今日用量按账号日累计取单账号单日最大值对比基线，超峰值自动更新 `~/.wb-switch/model_daily_peaks.json`；输出「基线+逐账号」表格（百分比按账号各自算）。配套 `scripts/check_daily_limit.cmd` 双击即跑。commit `c74c1e3`→`8f37969`→`9af08ef`。
+- **两个 bug 已修**：① 播种直接拿逐行 credit 比大小退化成「单笔最大」（23.5/83.6 而非 719.1/806.1）→ 抽 `daily_model_credit()` 先汇总日累计再取 max；② `.cmd` UTF-8 无 BOM 中文在 GBK cmd 乱码报「不是内部或外部命令」→ 改纯 ASCII + CRLF + 开头 `chcp 65001`。
+- **待办**：WorkBuddy 5.5.6 更新包已下载未安装（环境项）；用量监控产品化待主人拍板。
+
