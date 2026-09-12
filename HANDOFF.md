@@ -1,72 +1,56 @@
 # HANDOFF — workbuddy-switch
 
-> 更新：2026-09-12 18:54 · 分支 dev · 工作区干净 · `9af08ef`
-> 本阶段：**积分口径三连突破** —— ① join key 修正（traceId→conversationRequestId，100% 命中）
-> ② 计费机制定论（主人亲证：无共享池，**每模型每日限额，超额禁用**；0 倍率=Hy3 限时免费）
-> ③ **官方逐笔明细按账号落盘**（credit_ledger，与官方接口完全一致、不受切号对齐影响）
-> ✅ 已竟：按账号×日×模型折线图（`reports/credit_ledger_charts.html`，4 张纯 SVG 零依赖）
-> ✅ 已竟：每模型单日最高用量表（`reports/model_max_daily.md`）+ 手动用量检查器（`scripts/analysis/model_daily_limit_check.py`）+ 一键 cmd（`scripts/check_daily_limit.cmd`）
-> ⚠️ 待办：WorkBuddy **5.5.6** 更新包已下载但**未安装**（见「下一步」5）
+> 更新：2026-09-12 21:22 · 分支 dev · `7843ea2` + 收尾提交
+> 本阶段：**6004 频率限制机制破案** —— ① 6004→对话→账号全链路打通（零时间比对）
+> ② 推翻"固定每日锚点"，定案**滑动窗口限流**（重置 = 绑定请求 + 窗口长，±5s 逐秒验证）
+> ③ 全网检索确认：官方无口径，社区"动态计算"与本地结论互相印证
+> ✅ 新增 `scripts/analysis/find_6004_events.py`（6004 检测/归因/解窗一体化）
 
 ## 进度（现在在哪）
 
-- **dev = `9af08ef`**（本会话 5 提交：`1788d89` 折线图 → `c74c1e3` 用量检查脚本 → `8f37969` 一键 cmd → `7c45eb4` cmd 编码修复 → `9af08ef` 输出改逐账号表格）
-- 验证：本会话仅改 Python 脚本 + .cmd（无 Rust/TS 改动），`cargo test`/`tsc` 门不适用；脚本均实跑通过；pre-commit 13 项 PASS；全部已 push
-- 本阶段产出（分析脚本在 `scripts/analysis/`，Rust 模块在 `wb-switch-core/src/modules/`）：
-  1. `session_cost.py`：按对话 Token/命中率/积分；`--by-account` 时间轴归因；`--by-model` 账号×模型双口径（total + 计费口径）
-  2. `official_vs_local.py`：官方账单 vs 本地记账逐格对照 → **本地 session_usage 只记超额段（4 天 21 格仅 2 格吻合）**，官方每笔都扣
-  3. `ledger_stats.py`：读账本按账号×日×模型统计 —— **按账号积分归属的权威口径**
-  4. `credit_ledger.rs`（本地专属，上游零冲突）：官方逐笔明细按账号落盘 `~/.wb-switch/credit_ledger/<accountId>.jsonl`（requestId+ts 去重、180 天清理），统计页点刷新自动触发，已真机验证 4 账号
-  5. `generate_ledger_charts.py`：读账本 → 4 张纯 SVG 折线图（`reports/credit_ledger_charts.html`，零外部依赖离线可看）：每账号一张（每线=一模型，X=日，Y=当日扣分）+ 一张三账号每日总扣分对比。口径直接取官方明细，不重算
-  6. `model_max_daily.md` + `model_daily_peak.md`（reports/，不入库）：每模型单日最高用量排序表（跨账号取最多的一天）—— **每天一个模型最多能用多少分的唯一可靠口径**
-  7. `model_daily_limit_check.py`：只盯 deepseek-v4.1-flash / glm-5.3-flash；今日用量按账号日累计、取单账号单日最大值对比峰值基线；超峰值自动更新 `~/.wb-switch/model_daily_peaks.json`
-  8. `check_daily_limit.cmd`：双击即跑上脚本（纯 ASCII + CRLF + `chcp 65001`，避开 GBK 乱码）
-  9. 账本全景（31 天窗口）：**真实扣分 17,184 积分**（H 7,832 / Harvey 6,248 / Elaine 3,104），大头是 deepseek-v4-flash 10,374（60%，8 月旧模型，9 月已切 ds-v4.1-flash 0.03x）
-- 关键认知修正（主人 16:51 亲证）：**没有账号级共享额度池**；收费标准各账号一样（单笔均价 H 4.01 ≈ Elaine 4.02）；**每个模型有每日限额，超额禁用只能换模型**；当前仅 Hy3 0.00x 限时免费
-- ⚠️ **H 余额告急**：剩 239.7/4765（95% 已用，09-12 17:04 快照）；Elaine 1,891.6/4,927 · Harvey 941.3/4,588 · 廿七 2,100/2,100（新号未用）
+- **dev = `7843ea2`** + 本收尾提交（新增 `find_6004_events.py`；本会话其余产出全在 memory，不入库）
+- 验证：本会话仅改 Python 脚本 + memory（无 Rust/TS 改动）；`cargo test` + `tsc --noEmit` 双门绿（收尾时复跑确认）
+- **6004 全链路关联方法（全部实测验证）**：
+  1. **事件→对话**：6004 在 `~/.workbuddy/logs/<日期>/sdk/conversations/<convId>.log`，**文件名 = `workbuddy.db`.`sessions.id`**，直接 key join 取标题/模型
+  2. **对话→账号**：`sessions.user_id` 被 wb-switch 对齐 L3 **改写为当前账号**（全表仅 1 值 = Elaine 的对齐痕迹，不可用）→ 真相源 = `~/.wb-switch/backups/workbuddy-desktop.*.info`（28 个，文件名 UTC 时间戳 + 文件内 `account.uid`），按"≤ 触发时刻的最后一个备份"二分归因。限制：备份只覆盖 09-10 21:49(UTC+8) 之后，之前的 6 次 6004 归因不了
+- **滑动窗口模型（本阶段核心结论）**：
+  - 6004 = **滑动窗口请求数限流**，错误码 `429/6004/category:quota`，硬阻断（弹窗"消耗积分继续"不适用）
+  - **重置时刻 = 容量绑定请求（窗口内第 C−N+1 旧的那条）+ 窗口长 W**，不必是最早一条
+  - 窗口长按模型不同：**ds-v4.1-flash = 24h**；**hy3 = 短窗（≈3h 或 4.5h，样本不足未定，下次触发可解）**
+  - 铁证：3 个重置锚点 − 24h 与真实 sendPrompt **±5s 精确吻合**（00:37:33↔Elaine 09-11 首用；20:56:45↔Elaine 晚间请求；14:26:22↔Harvey 切入后首用）
+  - 同一绑定未滑出前再次触发 6004，重置时刻不变（hy3 今晚 20:32/20:48 两次同 22:59:49 实证）
+  - ⚠️ credit_ledger 三主账本同落 14:26:22 边界与滑动窗模型的兼容性**未完全解释**（Harvey 案例已通：首用+24h）
+- 新脚本 `scripts/analysis/find_6004_events.py`：扫 6004 事件（模型/触发/重置）、按对话 join、按 auth 备份归因、解窗口长候选；**检测/复盘工具，非命中前预测**
 
 ## 决策（为什么这样做）
 
-- **统计口径一律复用项目实现，禁止 Python 复刻**：复刻版算 8,530 条 vs 项目实际 8,554 条，偏差数百条且难定位 → 改为 `examples/dump_stats.rs` 直调。
-- **按对话统计，不按账号**（主人 2026-09-11 明确）：账号维度（额度紧张度等）降为次要信息，不作诊断主口径。
-- **积分不绕 traceId join**：`session_usage` 表天然按会话存（`session_id` 与 JSONL 文件名实测 42/42 对应），直接查表即可；旧方案「join JSONL」已废弃。
-- **Python 脚本只做聚合，不重算项目口径**：token/命中率由 Rust 侧产出 JSON，Python 只负责与积分合并渲染。
-- **`reports/` 不入库**：含本机项目名/路径，且可由脚本随时重现。
-- **限额监控自动标定不可靠（主人 18:21 拍板）**：「某日某模型 credit 突停+换模型=触顶禁用」信号被否——账本是账单记录不含换模型原因，且被三种情况污染：①没到量主动换 ②并行多任务多模型（实证 H 09-10 单日同跑 ds-v4.1-flash719+glm-5.3374+minimax-m3130）③免费模型 hy3 credit 恒 0 信号失效。→ 每模型单日最高用量（`model_max_daily.md` 峰值表）是**唯一可靠**的「每天最多用多少分」；若产品化监控，只能用「同日 plateau+其他模型仍活跃」软信号且标「疑似」，排除免费模型。
-- **手动用量检查器口径**：今日用量按账号日累计、取「单账号单日最大值」对比全局峰值基线（与峰值表一致）；基线 `~/.wb-switch/model_daily_peaks.json` 只增不减，超了就更新。不接入项目页面，纯手动（主人要求）。
-- 历史决策（账号发现数据源 / 对齐分层 / 云端自动化放弃 / vite 白壳 issue #30）见 `docs/PROGRESS.md`，此处不重复。
+- **`sessions.user_id` 不可作账号归因**：每次切号 L3 对齐把它改写为当前 uid——归属重建唯一真相源是 auth 备份时间线（与 MEMORY 既定决策一致，本次在 6004 场景再次验证）。
+- **日志里的 `32hex/36hex` 前缀 = 每次请求的相关性 ID，不是账号 ID**：同一对话内出现多个不同值即证（`c522dc02` 内 3 个、`a21e5f21` 内 2 个）。任何"按它分组"的结论无效。
+- **"固定每日锚点"两度被否**：①credit_ledger 版（三账号 14:26:22）被 6004 归因后 Elaine 双锚点否；②"触顶后滚动 24h"（H2）被"4 次连触同一重置时刻"否。滑动窗+绑定请求语义是唯一同时满足全部 14 个样本的模型。
+- **6004 轴与积分轴独立**：`credit_ledger` 只记成功+计费请求，429 不入账，账本无法观测 6004。
+- **全网检索（2026-09-12）**：官方《错误码处理说明》对 6004 仅说"切换模型重试"，无机制；腾讯云社区明确"**重置时间由系统按资源情况动态计算**"——与滑动窗模型互证。php.cn"北京 12 点刷新"说法与本地秒级实测矛盾，判定低质不采信。
+- 历史决策（统计口径/账本/对齐分层/自动标定不可靠等）见 `docs/PROGRESS.md` 与下文坑位，此处不重复。
 
 ## 坑位（别再踩）
 
-1. **统计口径三条公式**（权威：`crates/wb-switch-core/src/modules/token_stats.rs`）
-   - `total = input + output + cacheWrite`（**input 已含 cacheRead，不重复加**）
-   - 命中率 `= cacheRead / input`
-   - 用量优先级 `message.usage` > `providerData.usage` > 顶层 `usage`；**必须有 input 字段存在**才算有效记录；`rawUsage` 只兜底 cacheWrite
-   - **一个 JSONL 文件 = 一个对话**；排除 `subagents/`
-2. **AI 沙箱里 server 起不来**：`wb-switch-rust.exe` 是 GUI 版（启动报 crashpad）；server 是 `wb-switch.exe`，但在沙箱里后台启动后**不监听端口** → 取数一律走 `examples/dump_stats.exe`，别折腾 HTTP。
-3. **example 产物路径**：`target/debug/examples/dump_stats.exe`；编译命令需带 GNU 三件套（`RUSTFLAGS=-C link-arg=-fuse-ld=lld` + `w64devkit/bin` 入 PATH），增量约 15s。
-4. AI 沙箱读不了宿主 `CodeBuddyExtension/.../auth`（os error 5）→ 需放行前台命令；主人正常环境无此问题。
-5. 版本判定：真实版本只看 `resources/install-manifest.json` 的 `appVersion`；安装目录 `version` 文件是 **Electron 内核版本**，`cli/vendor/sandbox/<x>/` 是 **sandbox 组件版本**，都不是 WorkBuddy 版本。
-6. `.asar` 是 Electron **归档非加密**（头部明文 JSON 索引）→ 可解包，但 WorkBuddy 仍闭源，受 License 约束。
-7. 大仓库 git 写操作（checkout/merge/gc）**不在 2 分钟前台超时窗口内跑**（曾两次损坏 `.git`）；`gc.auto=0` 勿改回。关键节点必须 push。
-8. 编译前停掉运行中的 `wb-switch.exe` / `wb-switch-rust.exe`。
-9. **`.cmd` 必须用纯 ASCII + CRLF + 开头 `chcp 65001`**：UTF-8 无 BOM 中文在 GBK 代码页 cmd 下乱码，连 `cd`/`set` 等 ASCII 行也被误解析报「不是内部或外部命令」。中文输出交给 python（控制台 65001 即正确显示）。
-10. **账本聚合必须先按 (账号,日,模型) 汇总日累计再取 max**：直接拿逐行 credit 比大小会退化成「单笔最大」（初版播种出 23.5/83.6 而非 719.1/806.1），抽 `daily_model_credit()` 先汇总。
-11. **Git Bash 下 `$USERPROFILE` 路径会被 mangled**（`d:\...\C:\Users\WH\...`）：删/读 `~/.wb-switch` 下的文件一律用 Python `os.path.expanduser("~")`，别用 shell 变量。
+1. **统计口径三条公式**（权威：`crates/wb-switch-core/src/modules/token_stats.rs`）：`total = input + output + cacheWrite`（input 已含 cacheRead）；命中率 `= cacheRead / input`；usage 优先级 `message > providerData > 顶层` 且须有 input 字段；一个 JSONL = 一个对话，排除 `subagents/`。
+2. **AI 沙箱里 server 起不来**：取数一律走 `examples/dump_stats.exe`，别折腾 HTTP。
+3. example 产物 `target/debug/examples/dump_stats.exe`；GNU 三件套（`RUSTFLAGS=-C link-arg=-fuse-ld=lld` + w64devkit 入 PATH），增量约 15s。
+4. AI 沙箱读不了宿主 `CodeBuddyExtension/.../auth`（os error 5）→ 放行前台命令。
+5. 版本判定只看 `resources/install-manifest.json` 的 `appVersion`；`version` 文件是 Electron 内核版本。
+6. 大仓库 git 写操作不进 2 分钟前台窗口（曾两次损坏 `.git`）；`gc.auto=0` 勿改回；关键节点必须 push。
+7. 编译前停掉运行中的 `wb-switch.exe` / `wb-switch-rust.exe`。
+8. `.cmd` 必须纯 ASCII + CRLF + 开头 `chcp 65001`。
+9. 账本聚合先按 (账号,日,模型) 汇总日累计再取 max，别拿逐行比大小。
+10. Git Bash 下 `$USERPROFILE` 会被 mangled → 用 Python `os.path.expanduser("~")`。
+11. **6004 日志里没有账号字段**；长哈希先做"同实体多值"反证再当主键用（本次教训：请求相关性 ID 被误当账号 ID）。
+12. `npx` 在沙箱触发 Program Blacklist（wsl.exe）→ tsc 直接调 `node.exe node_modules/typescript/bin/tsc --noEmit`。
 
 ## 下一步
 
-1. ✅ **（已完成）按账号×日×模型积分折线图**：`reports/credit_ledger_charts.html`（4 张纯 SVG 零依赖）。重跑：`python scripts/analysis/generate_ledger_charts.py`
-2. **用量监控：手动版已完成，产品化待定** —— 手动检查器（`scripts/analysis/model_daily_limit_check.py` + 双击 `scripts/check_daily_limit.cmd`）已可用，输出「基线+逐账号」表格，超峰值自动更新 `~/.wb-switch/model_daily_peaks.json`。**自动标定真实每日限额不可靠**（见决策 限额监控自动标定不可靠），若产品化只能做软信号且标「疑似」、排除免费模型；可选：① 接成定时任务每天自动跑 ② 切号对话框加「余额<20% + 单模型逼近峰值」提醒（H 已 95%）
-3. **账本 UI 化（可选）**：统计页加「按账号扣分」视图，读 `credit_ledger/` 即可（口径与官方一致）
-4. **`credit_diagnose.py` 已保留**（撤销 9-11「可删」判断；账号×模型归因依赖它共享的 timeline 模块）——旧待办作废
-5. **安装 WorkBuddy 5.5.6**（环境待办）
-   - 包已就位：`C:\Users\WH\AppData\Local\Temp\workbuddy-update-x64\WorkBuddy-Setup-5.5.6.38337834.exe`
-   - 双击安装 → 重启 WorkBuddy → 设置里「检查更新」应显示已最新
-   - **装前建议**：`git tag pre-5.5.6` + 快照 `~/.wb-switch/`；装后**必须回归**两项：① 切号主题跟随 ② 切号对齐勾选（新版可能改 LevelDB / db 结构，`ui_theme.rs` 注入逻辑或需同步调整）
-   - 若安装无反应/版本未变：查火绒实时防护是否拦截写 `C:\Program Files\WorkBuddy\`
-6. **按对话统计并入 webui**（可选）：需新增 Rust 侧「积分按会话」接口（读 `session_usage`）+ 前端页面
-7. **issue #30 跟进**：https://github.com/changexbc/workbuddy-switch/issues/30 —— 维护者积极则按 ①vite →②账号发现 →③数据对齐 顺序提 PR
-8. **项目 memory 未入库**：`.gitignore` 含 `/.workbuddy/`，`.workbuddy/memory/*.md` 不入库（跨会话交接物之一）。若要入库需调整该条忽略规则 —— 待主人决定
-9. 备选：`wb_multi_sync` 退役（L4/L5 已内置）；主题皮肤加载闪烁根治依赖官方（issue #93057）
-10. **重置锚点已实弹确认（2026-09-12 19:11）**：ds-v4.1-flash 每日限额**固定重置于每天 14:26:22（北京时间）**，配额窗口 `[14:26:22 → 次日 14:26:22)`；非日历零点、非触顶后滚动 24h（H2 已被三账号账本否决）。验证脚本 `scripts/analysis/verify_reset_anchor.py` 可复跑。**待办（B）**：`model_daily_limit_check.py` / `model_daily_peaks.json` 当前按日历日 00:00 聚合，与真实 14:26:22 窗口错位 → 需改为按 14:26:22 边界重窗，峰值表才与真实窗口对齐（跨边界用量当前会被拆到两日历日，既漏报窗口级超额又低估上限）。
+1. **解死 hy3 窗口长（下次 hy3 触发时）**：跑 `scripts/analysis/find_6004_events.py`，取触发时刻 + 全部 hy3 请求序列，在"锚≈3h（11:59:49Z 候选，或有一条未入 sendPrompt 的内部调用）"vs"4.5h（10:29:49Z cdcec156，精确到秒）"间定案。一次触发即够。
+2. **`model_daily_limit_check.py` 重窗方案需重新评估**：原"按 14:26:22 固定锚重窗"的依据（固定锚点）已被滑动窗模型推翻。credit_ledger 的 14:26:22 边界在滑动窗语义下 = 当日绑定请求+24h 的巧合或另有机制 → **先解释 credit_ledger 14:26:22 边界与滑动窗的兼容性**，再决定检查脚本是否还需要重窗（`verify_reset_anchor.py` 的"固定锚"结论同步作废待复核）。
+3. **find_6004_events.py 可选增强**：自动做"重置−W 与请求序列匹配"的解窗输出（当前手动解）；把 auth 备份归因集成进主输出表。
+4. 安装 WorkBuddy **5.5.6**（包在 `C:\Users\WH\AppData\Local\Temp\workbuddy-update-x64\`；装前 `git tag pre-5.5.6` + 快照 `~/.wb-switch/`；装后回归切号主题跟随 + 对齐勾选）。
+5. 用量监控产品化待定（手动版 `model_daily_limit_check.py` + `check_daily_limit.cmd` 已可用；自动标定不可靠，只能软信号）；账本 UI 化、按对话统计进 webui 均可选。
+6. issue #30 跟进（vite → 账号发现 → 数据对齐 顺序提 PR）；H 余额 95% 已用，切号对话框"余额告急+逼近峰值"提醒可做。
