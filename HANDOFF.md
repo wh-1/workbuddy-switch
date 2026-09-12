@@ -49,7 +49,7 @@
 ## 下一步
 
 1. **解死 hy3 窗口长（下次 hy3 触发时）**：跑 `scripts/analysis/find_6004_events.py`，取触发时刻 + 全部 hy3 请求序列，在"锚≈3h（11:59:49Z 候选，或有一条未入 sendPrompt 的内部调用）"vs"4.5h（10:29:49Z cdcec156，精确到秒）"间定案。一次触发即够。
-2. **`model_daily_limit_check.py` 重窗方案需重新评估**：原"按 14:26:22 固定锚重窗"的依据（固定锚点）已被滑动窗模型推翻。credit_ledger 的 14:26:22 边界在滑动窗语义下 = 当日绑定请求+24h 的巧合或另有机制 → **先解释 credit_ledger 14:26:22 边界与滑动窗的兼容性**，再决定检查脚本是否还需要重窗（`verify_reset_anchor.py` 的"固定锚"结论同步作废待复核）。
+2. **`model_daily_limit_check.py` 重窗方案需重新评估**：原"按 14:26:22 固定锚重窗"的依据（固定锚点）已被滑动窗模型推翻。credit_ledger 的 14:26:22 边界在滑动窗语义下 = 当日绑定请求+24h 的巧合或另有机制 → **先解释 credit_ledger 14:26:22 边界与滑动窗的兼容性**，再决定检查脚本是否还需要重窗（`verify_reset_anchor.py` 已删除——固定锚结论作废；`model_daily_limit_check.py` 头部已加「窗口口径待重评」标注）。
 3. **find_6004_events.py 可选增强**：自动做"重置−W 与请求序列匹配"的解窗输出（当前手动解）；把 auth 备份归因集成进主输出表。
 4. 安装 WorkBuddy **5.5.6**（包在 `C:\Users\WH\AppData\Local\Temp\workbuddy-update-x64\`；装前 `git tag pre-5.5.6` + 快照 `~/.wb-switch/`；装后回归切号主题跟随 + 对齐勾选）。
 5. 用量监控产品化待定（手动版 `model_daily_limit_check.py` + `check_daily_limit.cmd` 已可用；自动标定不可靠，只能软信号）；账本 UI 化、按对话统计进 webui 均可选。
