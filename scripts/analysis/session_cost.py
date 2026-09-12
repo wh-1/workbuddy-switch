@@ -8,24 +8,34 @@
   - 积分            → workbuddy.db 的 session_usage.credit_json
                       （该表天然按会话存储：每行一个会话，值为 {traceId: 积分}）
 
-三个指标都以**对话**为单位，不再按账号拆分。
+三个指标都以**对话**为单位；`--by-account` 追加一张按账号分摊表。
+
+按账号分摊不用 sessions.user_id（切号对齐会把它改写成当前账号），而是走
+**账号时间轴归因**（见 account_timeline.py）：
+  - Token 按记录时刻归因 → 可精确到每次调用（跨账号会话也能拆）
+  - 积分按会话起始时刻归因 → 跨账号会话的积分整笔归给起始账号
+  - ⚠️ 用过「复制会话」会让同一批 usage 在两个 JSONL 里重复出现 → Token 翻倍
 
 用法：
   python session_cost.py                      # 近 30 天
   python session_cost.py --days 7             # 近 7 天
   python session_cost.py --days 0             # 全量
+  python session_cost.py --by-account         # 追加按账号分摊表
   python session_cost.py --top 30             # 只看前 30 个对话
   python session_cost.py --json out.json      # 导出合并结果
 """
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import os
 import sqlite3
 import subprocess
 import sys
 import tempfile
+
+import account_timeline as at
 
 HOME = os.path.expanduser("~")
 DB_PATH = os.path.join(HOME, ".workbuddy", "workbuddy.db")
@@ -107,6 +117,74 @@ def load_session_credits() -> dict:
     return out
 
 
+def attribute_by_account(days: int | None, credits: dict) -> tuple[list[dict], dict]:
+    """按账号分摊 Token 与积分（时间轴归因，见 account_timeline.py）。
+
+    返回 (rows, meta)：
+      rows: [{account, uid, tokens, records, credits, creditedSessions, sessions}]
+      meta: {scanTokens, timelineEvents, timelineStart}
+    """
+    import collections
+
+    cutoff = (
+        int((dt.datetime.now() - dt.timedelta(days=days)).timestamp() * 1000)
+        if days
+        else None
+    )
+    events, names = at.load_account_timeline()
+    tokens: collections.Counter = collections.Counter()
+    records: collections.Counter = collections.Counter()
+    first: dict[str, tuple[int, str | None]] = {}
+    sessions_by_acct: collections.Counter = collections.Counter()
+    scan_total = 0
+    for sid, ts, tok in at.scan_records(cutoff):
+        acct = at.account_at(events, ts)
+        tokens[acct] += tok
+        records[acct] += 1
+        scan_total += tok
+        prev = first.get(sid)
+        if prev is None or ts < prev[0]:
+            first[sid] = (ts, acct)
+    for _sid, (_ts, acct) in first.items():
+        sessions_by_acct[acct] += 1
+
+    credit: collections.Counter = collections.Counter()
+    credited: collections.Counter = collections.Counter()
+    for sid, info in credits.items():
+        val = float(info.get("credit") or 0.0)
+        if val <= 0:
+            continue
+        seen = first.get(sid)
+        if not seen or (cutoff and seen[0] < cutoff):
+            continue
+        credit[seen[1]] += val
+        credited[seen[1]] += 1
+
+    rows = []
+    for uid in set(tokens) | set(credit) | set(sessions_by_acct):
+        tok = tokens.get(uid, 0)
+        cred = credit.get(uid, 0.0)
+        rows.append(
+            {
+                "account": at.label(uid, names),
+                "uid": uid,
+                "tokens": tok,
+                "records": records.get(uid, 0),
+                "sessions": sessions_by_acct.get(uid, 0),
+                "credits": round(cred, 2),
+                "creditedSessions": credited.get(uid, 0),
+                "creditsPerMillion": round(cred / (tok / 1e6), 3) if tok else 0.0,
+            }
+        )
+    rows.sort(key=lambda r: -r["tokens"])
+    meta = {
+        "scanTokens": scan_total,
+        "timelineEvents": len(events),
+        "timelineStart": events[0][0] if events else None,
+    }
+    return rows, meta
+
+
 def fmt(n: float) -> str:
     if n >= 1e9:
         return f"{n/1e9:.2f}B"
@@ -132,6 +210,8 @@ def main() -> int:
     ap.add_argument("--json", type=str, default=None, help="导出合并结果 JSON")
     ap.add_argument("--source", type=str, default="workbuddy",
                     help="数据源（默认 workbuddy）")
+    ap.add_argument("--by-account", action="store_true",
+                    help="追加按账号分摊表（时间轴归因）")
     args = ap.parse_args()
 
     days = args.days if args.days and args.days > 0 else None
@@ -211,6 +291,37 @@ def main() -> int:
     print("  · 删对话会清 session_usage → 无积分的对话多为已删除或纯免费额度消耗")
     print()
 
+    by_account = None
+    if args.by_account:
+        by_account, meta = attribute_by_account(days, credits)
+        total_tok = sum(r["tokens"] for r in by_account)
+        total_cred = sum(r["credits"] for r in by_account)
+        official_total = summary.get("total", 0)
+        print("=" * 92)
+        print("  按账号分摊（时间轴归因：Token 按记录时刻 / 积分按会话起始时刻）")
+        print("=" * 92)
+        print(f"  时间线事件 {meta['timelineEvents']} 个"
+              + (f"，起点 {dt.datetime.fromtimestamp(meta['timelineStart'] / 1000):%m-%d %H:%M}"
+                 if meta["timelineStart"] else "")
+              + f"；本次扫描 Token {fmt(total_tok)}"
+              + (f"（产品口径 {fmt(official_total)}，差 "
+                 f"{abs(total_tok - official_total) / official_total * 100:.1f}%）" if official_total else ""))
+        print()
+        print("-" * 92)
+        print(f"  {'账号':<12}{'Token':>9}{'占比':>8}{'调用':>7}{'积分':>10}{'占比':>8}"
+              f"{'积分/百万':>11}{'记账对话':>9}")
+        print("-" * 92)
+        for r in by_account:
+            tok_share = (r["tokens"] / total_tok * 100) if total_tok else 0
+            cred_share = (r["credits"] / total_cred * 100) if total_cred else 0
+            print(f"  {r['account']:<12}{fmt(r['tokens']):>9}{tok_share:>7.1f}%"
+                  f"{r['records']:>7}{r['credits']:>10.2f}{cred_share:>7.1f}%"
+                  f"{r['creditsPerMillion']:>11.2f}{r['creditedSessions']:>9}")
+        print("-" * 92)
+        print("  · Token 归因可精确到每次调用（跨账号会话能拆）；积分到会话级")
+        print("  · ⚠️ 用过「复制会话」会致同一批 usage 重复出现 → Token 偏高")
+        print()
+
     if args.json:
         out = {
             "range_days": days,
@@ -218,6 +329,8 @@ def main() -> int:
             "summary": summary,
             "sessions": rows,
         }
+        if by_account is not None:
+            out["by_account"] = by_account
         with open(args.json, "w", encoding="utf-8") as fh:
             json.dump(out, fh, ensure_ascii=False, indent=2)
         print(f"  JSON 已写入 {args.json}")

@@ -29,76 +29,20 @@ import datetime as dt
 import glob
 import json
 import os
-import re
 import sqlite3
 import sys
 from collections import defaultdict
 
+import account_timeline as at
+
 HOME = os.path.expanduser("~")
 DB_PATH = os.path.join(HOME, ".workbuddy", "workbuddy.db")
 PROJECTS_DIR = os.path.join(HOME, ".workbuddy", "projects")
-AUTH_DIR = os.path.join(
-    HOME, "AppData", "Local", "CodeBuddyExtension", "Data", "Public", "auth"
-)
+AUTH_DIR = at.AUTH_DIR
 
-
-def load_account_timeline():
-    """从官方 auth 目录历史备份重建账号切换时间线。
-
-    返回 (events, names)
-      events = [(ts_ms, uid), ...]  按时间升序
-      names  = {uid: nickname}
-
-    原理：auth 目录每产生一次凭据快照就落一个 .info 文件，
-    文件名内含 ISO 时间戳，文件内含 account.uid。
-    给定任意时刻，取「不晚于该时刻的最后一个事件」的 uid 即为当时账号。
-    """
-    events = []
-    names = {}
-    if not os.path.isdir(AUTH_DIR):
-        return events, names
-    pat = re.compile(r"workbuddy-desktop\.(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z)\.")
-    for name in os.listdir(AUTH_DIR):
-        m = pat.match(name)
-        if not m:
-            continue
-        iso = m.group(1)
-        try:
-            # 2026-08-08T01-00-59-843Z -> 2026-08-08T01:00:59.843Z
-            d = dt.datetime.strptime(iso, "%Y-%m-%dT%H-%M-%S-%fZ")
-            ts = int(d.replace(tzinfo=dt.timezone.utc).timestamp() * 1000)
-        except ValueError:
-            continue
-        try:
-            with open(os.path.join(AUTH_DIR, name), encoding="utf-8") as fh:
-                data = json.load(fh)
-        except (OSError, ValueError):
-            continue
-        acct = data.get("account") or {}
-        uid = acct.get("uid")
-        if not uid:
-            continue
-        nick = acct.get("nickname") or uid[:8]
-        names[uid] = nick
-        events.append((ts, uid))
-    events.sort()
-    return events, names
-
-
-def account_at(events, ts_ms):
-    """给定毫秒时间戳，返回当时的 uid（二分查找最后一个 <= ts 的事件）。"""
-    if not events or not ts_ms:
-        return None
-    lo, hi = 0, len(events) - 1
-    best = None
-    while lo <= hi:
-        mid = (lo + hi) // 2
-        if events[mid][0] <= ts_ms:
-            best = events[mid][1]
-            lo = mid + 1
-        else:
-            hi = mid - 1
-    return best
+# 账号时间轴归因已抽到共享模块 account_timeline.py（session_cost.py 也用它）
+load_account_timeline = at.load_account_timeline
+account_at = at.account_at
 
 
 def open_db():
