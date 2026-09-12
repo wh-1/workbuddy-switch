@@ -1,22 +1,24 @@
 # HANDOFF — workbuddy-switch
 
-> 更新：2026-09-11 凌晨 · 分支 dev · 工作区干净
-> 上阶段：合并上游 v0.1.36 + 切号对齐修复 + 主题跟随账号（均已 GUI 实测通过）
-> 本阶段：**按对话统计工具**（Token / 命中率 / 积分）—— 口径完全复用项目实现
-> ⚠️ 待办：WorkBuddy **5.5.6** 更新包已下载但**未安装**（见「下一步」1）
+> 更新：2026-09-12 18:00 · 分支 dev · 工作区干净 · `cff33b5`
+> 本阶段：**积分口径三连突破** —— ① join key 修正（traceId→conversationRequestId，100% 命中）
+> ② 计费机制定论（主人亲证：无共享池，**每模型每日限额，超额禁用**；0 倍率=Hy3 限时免费）
+> ③ **官方逐笔明细按账号落盘**（credit_ledger，与官方接口完全一致、不受切号对齐影响）
+> ⚠️ 未竟：按账号×日×模型折线图（数据就绪，出图环节因会话工具故障未执行，见「下一步」1）
+> ⚠️ 待办：WorkBuddy **5.5.6** 更新包已下载但**未安装**（见「下一步」5）
 
 ## 进度（现在在哪）
 
-- **dev = `e70a515`**（本阶段单提交；上一节点 `6f403d2` = 9/10 收尾文档）
-- 验证（收尾复核）：`cargo test -p wb-switch-core` **182 全绿** · `npx tsc --noEmit` 绿 · pre-commit 项目体检 **8/8 PASS**
-- 本阶段产出：
-  1. `crates/wb-switch-core/examples/dump_stats.rs` — 诊断 example，直调 `token_stats::get_statistics()`，支持 `[days]` / `--sessions` / `--json <path>`
-  2. `scripts/analysis/session_cost.py` — **主脚本**：按对话输出 Token / 命中率 / 积分
-  3. `scripts/analysis/credit_diagnose.py` — 辅助：积分时间分布 / 模型 / 项目维度
-  4. `.gitignore` 新增忽略 `reports/`（产物可重新生成）
-- 实测（近 30 天）：**58 对话 · 1.70B token · 8,563 调用 · 命中率 96.0% · 积分 1,616.23**（仅 13 个对话有积分记账）
-- 环境事实：本机 WorkBuddy 当前 **5.5.4**；官方 **5.5.6.38337834** 更新包已下载至 `%TEMP%\workbuddy-update-x64\WorkBuddy-Setup-5.5.6.38337834.exe`（532MB），日志只有 `ready` 无 install 事件 → **未安装**
-- **main = `bbb0d3c`**（上游 v0.1.36）；origin 双备份；构建形态仍是 debug exe + vite，**无 release 包**
+- **dev = `cff33b5`**（本日 5 提交：`225583d` by-account → `4605d17` join key 修复 → `4e70f7f` 计费口径 → `dceaca1` 官方对照 → `cff33b5` credit_ledger）
+- 验证：`cargo test -p wb-switch-core` **188 全绿** · pre-commit 13 项 PASS · 全部已 push
+- 本阶段产出（分析脚本在 `scripts/analysis/`，Rust 模块在 `wb-switch-core/src/modules/`）：
+  1. `session_cost.py`：按对话 Token/命中率/积分；`--by-account` 时间轴归因；`--by-model` 账号×模型双口径（total + 计费口径）
+  2. `official_vs_local.py`：官方账单 vs 本地记账逐格对照 → **本地 session_usage 只记超额段（4 天 21 格仅 2 格吻合）**，官方每笔都扣
+  3. `ledger_stats.py`：读账本按账号×日×模型统计 —— **按账号积分归属的权威口径**
+  4. `credit_ledger.rs`（本地专属，上游零冲突）：官方逐笔明细按账号落盘 `~/.wb-switch/credit_ledger/<accountId>.jsonl`（requestId+ts 去重、180 天清理），统计页点刷新自动触发，已真机验证 4 账号
+  5. 账本全景（31 天窗口）：**真实扣分 17,184 积分**（H 7,832 / Harvey 6,248 / Elaine 3,104），大头是 deepseek-v4-flash 10,374（60%，8 月旧模型，9 月已切 ds-v4.1-flash 0.03x）
+- 关键认知修正（主人 16:51 亲证）：**没有账号级共享额度池**；收费标准各账号一样（单笔均价 H 4.01 ≈ Elaine 4.02）；**每个模型有每日限额，超额禁用只能换模型**；当前仅 Hy3 0.00x 限时免费
+- ⚠️ **H 余额告急**：剩 239.7/4765（95% 已用，09-12 17:04 快照）；Elaine 1,891.6/4,927 · Harvey 941.3/4,588 · 廿七 2,100/2,100（新号未用）
 
 ## 决策（为什么这样做）
 
@@ -44,13 +46,16 @@
 
 ## 下一步
 
-1. **安装 WorkBuddy 5.5.6**（环境待办，最高优先）
+1. **（最高优先，未竟）按账号×日×模型积分折线图**：数据全就绪（`credit_ledger/*.jsonl`，`ledger_stats.py` 可出数），本会话在出图环节因工具调用循环故障中断。新会话直接：读账本 → 三张折线图（每账号一张，每线=一模型，X=日，Y=当日扣分）+ 一张三账号总扣分对比总览
+2. **限额监控（可选产品化）**：账本里「某日某模型 credit 突停 + 换模型」= 触顶禁用信号 → 自动标定每模型每日限额；余额池 <20% 时在切号对话框提醒（H 已 95%）
+3. **账本 UI 化（可选）**：统计页加「按账号扣分」视图，读 `credit_ledger/` 即可（口径与官方一致）
+4. **`credit_diagnose.py` 已保留**（撤销 9-11「可删」判断；账号×模型归因依赖它共享的 timeline 模块）——旧待办作废
+5. **安装 WorkBuddy 5.5.6**（环境待办）
    - 包已就位：`C:\Users\WH\AppData\Local\Temp\workbuddy-update-x64\WorkBuddy-Setup-5.5.6.38337834.exe`
    - 双击安装 → 重启 WorkBuddy → 设置里「检查更新」应显示已最新
    - **装前建议**：`git tag pre-5.5.6` + 快照 `~/.wb-switch/`；装后**必须回归**两项：① 切号主题跟随 ② 切号对齐勾选（新版可能改 LevelDB / db 结构，`ui_theme.rs` 注入逻辑或需同步调整）
    - 若安装无反应/版本未变：查火绒实时防护是否拦截写 `C:\Program Files\WorkBuddy\`
-2. **（可选）按对话统计并入 webui**：把 Token/命中率/积分三列做成产品页 → 需新增 Rust 侧「积分按会话」接口（读 `session_usage`）+ 前端页面
-3. **（待定）`credit_diagnose.py` 去留**：主人已明确不关注账号维度，可删（`scripts/analysis/credit_diagnose.py`）
-4. **issue #30 跟进**：https://github.com/changexbc/workbuddy-switch/issues/30 —— 维护者积极则按 ①vite →②账号发现 →③数据对齐 顺序提 PR
-5. **项目 memory 未入库**：`.gitignore` 含 `/.workbuddy/`，导致 `.workbuddy/memory/*.md` 不入库（跨会话交接物之一）。若要入库需调整该条忽略规则 —— 待主人决定
-6. 备选：`wb_multi_sync` 退役（L4/L5 已内置）；主题皮肤加载闪烁根治依赖官方（issue #93057）
+6. **按对话统计并入 webui**（可选）：需新增 Rust 侧「积分按会话」接口（读 `session_usage`）+ 前端页面
+7. **issue #30 跟进**：https://github.com/changexbc/workbuddy-switch/issues/30 —— 维护者积极则按 ①vite →②账号发现 →③数据对齐 顺序提 PR
+8. **项目 memory 未入库**：`.gitignore` 含 `/.workbuddy/`，`.workbuddy/memory/*.md` 不入库（跨会话交接物之一）。若要入库需调整该条忽略规则 —— 待主人决定
+9. 备选：`wb_multi_sync` 退役（L4/L5 已内置）；主题皮肤加载闪烁根治依赖官方（issue #93057）
