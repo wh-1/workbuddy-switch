@@ -14,6 +14,12 @@ const base = process.env.VITE_PAGES_DEMO === "1" ? "/workbuddy-switch/" : "/";
 export default defineConfig(async () => ({
   base,
   plugins: [react(), tailwindcss()],
+  // esbuild 0.28.2 minify 会破坏 React 19 产物（useRef 返回 null → 白屏，
+  // 2026-09-13 实测：dev 正常 / --minify false 正常 / 仅 minify 崩）。
+  // 本地工具不在乎体积，直接关压缩，附带产物可调试。
+  build: {
+    minify: false,
+  },
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
