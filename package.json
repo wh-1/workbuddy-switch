@@ -35,8 +35,8 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "lucide-react": "^1.31.0",
-    "react": "^19.1.0",
-    "react-dom": "^19.1.0",
+    "react": "19.1.0",
+    "react-dom": "19.1.0",
     "react-router-dom": "^7.18.2",
     "recharts": "^2.15.4",
     "sonner": "^2.0.8",
@@ -52,6 +52,6 @@
     "@vitejs/plugin-react": "^4.6.0",
     "tailwindcss": "^4.3.3",
     "typescript": "~5.8.3",
-    "vite": "^7.0.4"
+    "vite": "8.3.0"
   }
 }

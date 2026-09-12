@@ -14,16 +14,27 @@ const base = process.env.VITE_PAGES_DEMO === "1" ? "/workbuddy-switch/" : "/";
 export default defineConfig(async () => ({
   base,
   plugins: [react(), tailwindcss()],
-  // esbuild 0.28.2 minify 会破坏 React 19 产物（useRef 返回 null → 白屏，
-  // 2026-09-13 实测：dev 正常 / --minify false 正常 / 仅 minify 崩）。
-  // 本地工具不在乎体积，直接关压缩，附带产物可调试。
+  // esbuild 0.28.2 minify 在 React 19 下会产生坏产物（useRef/useState null 白屏）
   build: {
     minify: false,
+    // rollup 对 react 的 CJS interop 生成了两个实例（react_production/$1），
+    // 部分组件（App.tsx/UpdateCenter）绑到无 dispatcher 的副本 → hooks null 白屏。
+    // strictRequires 强制每个 CJS 模块严格惰性包装，消除重复实例。
+    commonjsOptions: {
+      strictRequires: true,
+      transformMixedEsModules: true,
+    },
   },
   resolve: {
-    alias: {
-      "@": path.resolve(__dirname, "./src"),
-    },
+    alias: [
+      { find: "@", replacement: path.resolve(__dirname, "./src") },
+      // 收敛 React 单实例：产物曾出现两份 react_production（hooks dispatcher
+      // 落空 → useRef null → 白屏）。精确正则 alias 到唯一物理入口文件。
+      { find: /^react$/, replacement: path.resolve(__dirname, "node_modules/react/index.js") },
+      { find: /^react-dom$/, replacement: path.resolve(__dirname, "node_modules/react-dom/index.js") },
+      { find: /^react\//, replacement: path.resolve(__dirname, "node_modules/react") + "/" },
+      { find: /^react-dom\//, replacement: path.resolve(__dirname, "node_modules/react-dom") + "/" },
+    ],
   },
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`

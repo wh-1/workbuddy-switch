@@ -29,7 +29,7 @@ custom-protocol = ["tauri/custom-protocol"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon"] }
+tauri = { version = "2", features = ["tray-icon", "devtools"] }
 tauri-plugin-opener = "2"
 tauri-plugin-updater = "2"
 wb-switch-core = { path = "../crates/wb-switch-core" }
