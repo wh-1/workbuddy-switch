@@ -1,6 +1,6 @@
 # HANDOFF — workbuddy-switch
 
-> 更新：2026-09-13 凌晨 · 分支 dev · `e4597d8`
+> 更新：2026-09-13 凌晨 · 分支 dev · `6fb0323`（已推 origin/dev）
 > 本阶段：**切号体验收口**——① 对齐项默认全开 ② 复制会话与瘦身的冲突修复 ③ 对齐预览覆盖破坏性操作
 > 状态：**真机验证已通过**（四项默认全勾 + 预览三段齐全），进入收尾
 > 前序（已归档 `docs/PROGRESS.md`）：项目侧栏同步真机验证 · 白屏终局 vite 8.3.0 · 6004 滑动窗口
@@ -59,5 +59,6 @@
    - **C（预览瘦身数偏大）已修**：`preview_sync` 新增 `copy_session_ids` 参数（switch.rs 预览分支传 `opts.copy_session_ids`），经 `session_cwds()` 查 cwd，与 `slim.groups` 求交，输出 `slim.copyPlanned{total,hitCount,hitProjects}`；前端文案由「删除数可能更少」升级为「本次复制的 N 条会被跳过，其中 K 条落在上述 M 个瘦身项目」。匹配逻辑抽纯函数 `copy_hits()` 并带单测。
    - **D（传参隐患）已修**：`append_project_and_slim` 去掉独立 `dry_run` 参数，统一读 `opts.dry_run`；`preview_sync`/`post_close_sync` 先把 `dry_run` 写进 opts 克隆再传入，杜绝两处不一致。
    - **E（重复代码）已修**：抽 `run_switch_sync(target_acc, opts, protected_ids, copy_session_ids)`，两入口只留主题分歧；五项短路条件抽 `AlignOptions::any_enabled()`。
+   - **真机待验（GUI/server 已重编 04:11）**：① 关掉「设置同步」后点预览，应**仍显示**「界面主题：跟随目标账号」；② 勾选复制会话 + 瘦身时预览末行应出现「本次复制的 N 条会被跳过，其中 K 条落在上述 M 个瘦身项目」。
 10. **沙箱 git 视图坑（新增）**：沙箱内 `git fetch` 会打印 `[new branch] dev -> origin/dev` 但**本地 refs 实际不落盘**（下一条 `git branch -r` 看不到）。→ 判定是否已推只用 `git ls-remote <remote> <branch>`；`git rev-list origin/dev..HEAD` 报 128 是假象，不是未推送。
 7. src-tauri devtools feature 保留（诊断用，release 无副作用）——已定，无需处理。
