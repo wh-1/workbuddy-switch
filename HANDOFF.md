@@ -69,3 +69,4 @@
 7. **issue #30 跟进**：https://github.com/changexbc/workbuddy-switch/issues/30 —— 维护者积极则按 ①vite →②账号发现 →③数据对齐 顺序提 PR
 8. **项目 memory 未入库**：`.gitignore` 含 `/.workbuddy/`，`.workbuddy/memory/*.md` 不入库（跨会话交接物之一）。若要入库需调整该条忽略规则 —— 待主人决定
 9. 备选：`wb_multi_sync` 退役（L4/L5 已内置）；主题皮肤加载闪烁根治依赖官方（issue #93057）
+10. **重置锚点已实弹确认（2026-09-12 19:11）**：ds-v4.1-flash 每日限额**固定重置于每天 14:26:22（北京时间）**，配额窗口 `[14:26:22 → 次日 14:26:22)`；非日历零点、非触顶后滚动 24h（H2 已被三账号账本否决）。验证脚本 `scripts/analysis/verify_reset_anchor.py` 可复跑。**待办（B）**：`model_daily_limit_check.py` / `model_daily_peaks.json` 当前按日历日 00:00 聚合，与真实 14:26:22 窗口错位 → 需改为按 14:26:22 边界重窗，峰值表才与真实窗口对齐（跨边界用量当前会被拆到两日历日，既漏报窗口级超额又低估上限）。
