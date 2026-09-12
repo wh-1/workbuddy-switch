@@ -307,11 +307,15 @@ pub(crate) fn sync_project_set_in_db(
 }
 
 /// 会话瘦身：每账号每 cwd 保留 updated_at 最新 keep 条，其余软删。
+///
+/// `exclude` = 本次切号刚复制过来的会话 id —— 它们既不被删、也不占用保留名额，
+/// 否则「复制多条同项目会话 + 瘦身 keep=1」会让用户只看到 1 条（复制体互相挤掉）。
 pub(crate) fn slim_sessions_in_db(
     db_path: &Path,
     uid: &str,
     keep: i64,
     dry_run: bool,
+    exclude: &[String],
 ) -> Result<Value, String> {
     let keep = keep.max(1);
     let Some(conn) = open_db(db_path, false) else {
@@ -322,19 +326,39 @@ pub(crate) fn slim_sessions_in_db(
     }
 
     // 每组：cwd 分组，按 updated_at 倒序，第 keep 条之后的全软删。
+    // 排除集（本次复制体）：外层保证不被删，子查询里保证不占保留名额。
+    let excl: Vec<&String> = exclude.iter().filter(|s| !s.is_empty()).collect();
+    let excl_sql = |alias: &str| -> String {
+        if excl.is_empty() {
+            return String::new();
+        }
+        let marks = (0..excl.len())
+            .map(|i| format!("?{}", i + 3)) // ?1=uid, ?2=keep
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(" AND {alias}id NOT IN ({marks})")
+    };
+    let sql = format!(
+        "SELECT id, cwd FROM sessions s \
+         WHERE deleted_at IS NULL AND user_id = ?1{} AND id NOT IN (\
+           SELECT id FROM sessions \
+           WHERE deleted_at IS NULL AND user_id = ?1 AND cwd = s.cwd{} \
+           ORDER BY updated_at DESC LIMIT ?2\
+         )",
+        excl_sql("s."),
+        excl_sql(""),
+    );
+    let mut params: Vec<rusqlite::types::Value> = vec![
+        rusqlite::types::Value::Text(uid.to_string()),
+        rusqlite::types::Value::Integer(keep),
+    ];
+    for e in &excl {
+        params.push(rusqlite::types::Value::Text((*e).clone()));
+    }
     let victims: Vec<(String, String)> = {
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, cwd FROM sessions s \
-                 WHERE deleted_at IS NULL AND user_id = ?1 AND id NOT IN (\
-                   SELECT id FROM sessions \
-                   WHERE deleted_at IS NULL AND user_id = ?1 AND cwd = s.cwd \
-                   ORDER BY updated_at DESC LIMIT ?2\
-                 )",
-            )
-            .map_err(|e| e.to_string())?;
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
         let rows = stmt
-            .query_map(rusqlite::params![uid, keep], |r| {
+            .query_map(rusqlite::params_from_iter(params.iter()), |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
             })
             .map_err(|e| e.to_string())?;
@@ -361,6 +385,7 @@ pub(crate) fn slim_sessions_in_db(
     Ok(json!({
         "uid": uid,
         "keep": keep,
+        "excluded": excl.len(),
         "planned": victims.len(),
         "deleted": deleted,
         "groups": groups.iter().map(|(c, n)| json!({ "cwd": c, "count": n })).collect::<Vec<_>>(),
@@ -385,13 +410,18 @@ pub fn sync_project_set(src_uid: &str, dst_uid: &str, dry_run: bool, force: bool
     )
 }
 
-/// 真实路径包装：会话瘦身（含 db 备份）。
-pub fn slim_sessions(uid: &str, keep: i64, dry_run: bool) -> Result<Value, String> {
+/// 真实路径包装：会话瘦身（含 db 备份）。`exclude` = 不参与瘦身的会话 id（本次复制体）。
+pub fn slim_sessions(
+    uid: &str,
+    keep: i64,
+    dry_run: bool,
+    exclude: &[String],
+) -> Result<Value, String> {
     if !dry_run {
         let root = backup_dir().join("projects_anchor").join(utc_iso());
         backup_workbuddy_db(&root);
     }
-    slim_sessions_in_db(&workbuddy_db_path(), uid, keep, dry_run)
+    slim_sessions_in_db(&workbuddy_db_path(), uid, keep, dry_run, exclude)
 }
 
 #[cfg(test)]
@@ -524,7 +554,7 @@ mod tests {
     fn slim_keeps_latest_per_cwd() {
         let db = temp_db("slim");
         setup(&db);
-        let rep = slim_sessions_in_db(&db, "uid-a", 1, false).unwrap();
+        let rep = slim_sessions_in_db(&db, "uid-a", 1, false, &[]).unwrap();
         assert_eq!(rep["deleted"], 1, "p1 两条留最新，删 1");
         let conn = Connection::open(&db).unwrap();
         let alive: i64 = conn
@@ -539,6 +569,72 @@ mod tests {
             .query_row("SELECT id FROM sessions WHERE user_id='uid-a' AND cwd='D:\\p1' AND deleted_at IS NULL", [], |r| r.get(0))
             .unwrap();
         assert_eq!(kept, "s2", "保留 updated_at 最新的");
+    }
+
+    /// 回归：「复制多条同项目会话 + 瘦身 keep=1」——复制体必须全部存活，且不挤掉原有保留名额。
+    #[test]
+    fn slim_protects_copied_sessions() {
+        let db = temp_db("slim_protect");
+        setup(&db);
+        {
+            let conn = Connection::open(&db).unwrap();
+            // 模拟本次切号复制到 uid-a 的两条同项目会话（时间戳最新）
+            for (id, upd) in [("c1", 3000), ("c2", 4000)] {
+                conn.execute(
+                    "INSERT INTO sessions (id, cwd, user_id, title, created_at, updated_at)
+                     VALUES (?1, 'D:\\p1', 'uid-a', 'copied', 1, ?2)",
+                    rusqlite::params![id, upd],
+                )
+                .unwrap();
+            }
+        }
+        let alive = |db: &Path| -> Vec<String> {
+            let conn = Connection::open(db).unwrap();
+            let mut stmt = conn
+                .prepare("SELECT id FROM sessions WHERE cwd='D:\\p1' AND deleted_at IS NULL ORDER BY id")
+                .unwrap();
+            stmt.query_map([], |r| r.get::<_, String>(0))
+                .unwrap()
+                .flatten()
+                .collect()
+        };
+
+        // 无保护：keep=1 只留最新的 c2，复制体互相挤掉（用户只看到 1 条）
+        let rep = slim_sessions_in_db(&db, "uid-a", 1, false, &[]).unwrap();
+        let kept = alive(&db);
+        assert_eq!(kept, vec!["c2".to_string()], "无保护时只剩最新一条: {kept:?}");
+        assert_eq!(rep["deleted"], 3);
+
+        // 有保护：c1/c2 都留，且 p1 原有的最新一条 s2 也留（复制体不占名额）
+        let db2 = temp_db("slim_protect2");
+        setup(&db2);
+        {
+            let conn = Connection::open(&db2).unwrap();
+            for (id, upd) in [("c1", 3000), ("c2", 4000)] {
+                conn.execute(
+                    "INSERT INTO sessions (id, cwd, user_id, title, created_at, updated_at)
+                     VALUES (?1, 'D:\\p1', 'uid-a', 'copied', 1, ?2)",
+                    rusqlite::params![id, upd],
+                )
+                .unwrap();
+            }
+        }
+        let rep2 = slim_sessions_in_db(
+            &db2,
+            "uid-a",
+            1,
+            false,
+            &["c1".to_string(), "c2".to_string()],
+        )
+        .unwrap();
+        let kept2 = alive(&db2);
+        assert_eq!(
+            kept2,
+            vec!["c1".to_string(), "c2".to_string(), "s2".to_string()],
+            "复制体受保护 + 原有最新一条: {kept2:?}"
+        );
+        assert_eq!(rep2["deleted"], 1, "只删旧的 s1");
+        assert_eq!(rep2["excluded"], 2);
     }
 
     #[test]

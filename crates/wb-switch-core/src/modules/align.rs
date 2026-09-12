@@ -651,7 +651,13 @@ pub fn align_data(target_uid: &str, source_uid: Option<&str>, opts: &AlignOption
 /// 从 `switch.rs` 内联块下沉到这里（本地专属文件），使 switch.rs 的本地改动保持最小。
 /// 返回 `align_report`；主题跟随（原独立 theme_report）已并入报告的 `settings.theme`
 /// 子项——主题即账号外观设置，归入「设置同步」呈现（2026-09-12 定稿）。
-pub fn post_close_sync(target_acc: &Value, opts: &AlignOptions) -> Option<Value> {
+/// `protected_ids` = 本次切号刚复制到目标账号的会话 id：瘦身时必须跳过，
+/// 否则「复制多条同项目会话 + 瘦身」会让复制体互相挤掉，用户只看到 1 条。
+pub fn post_close_sync(
+    target_acc: &Value,
+    opts: &AlignOptions,
+    protected_ids: &[String],
+) -> Option<Value> {
     let target_uid = account_uid(target_acc);
     if target_uid.is_empty()
         || !(opts.align_automations || opts.align_sessions || opts.align_files || opts.sync_projects || opts.slim_keep > 0)
@@ -674,8 +680,14 @@ pub fn post_close_sync(target_acc: &Value, opts: &AlignOptions) -> Option<Value>
     }
 
     // 会话瘦身：每项目保留最近 N 条存活会话（放在项目同步之后，占位行也会纳入统计）。
+    // 排除本次复制体：既不被删、也不占保留名额（见 post_close_sync 文档）。
     if opts.slim_keep > 0 {
-        match crate::modules::projects_anchor::slim_sessions(&target_uid, opts.slim_keep, false) {
+        match crate::modules::projects_anchor::slim_sessions(
+            &target_uid,
+            opts.slim_keep,
+            false,
+            protected_ids,
+        ) {
             Ok(r) => report["slim"] = r,
             Err(e) => report["slim"] = json!({ "error": e }),
         }

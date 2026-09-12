@@ -114,6 +114,22 @@ pub fn switch_account(
     outcome
 }
 
+/// 从复制报告里取出新会话 id（瘦身时用作保护名单，避免复制体互相挤掉）。
+fn copied_session_ids(report: &Option<Value>) -> Vec<String> {
+    report
+        .as_ref()
+        .and_then(|r| r.get("copied"))
+        .and_then(|c| c.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|item| item.get("newId").and_then(|v| v.as_str()))
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn switch_account_inner(
     progress_fn: Option<&ProgressFn>,
     account_id: &str,
@@ -165,6 +181,8 @@ fn switch_account_inner(
             copy_report = session::copy_sessions_for_switch(&acc, &opts.copy_session_ids);
         }
         // 设置同步 + 主题跟随 + 项目侧栏同步（本地专属逻辑在 align::post_close_sync，switch.rs 保持薄）
+        // 复制体受保护：瘦身不删它们、也不让它们占用每项目保留名额。
+        let protected = copied_session_ids(&copy_report);
         align_report = align::post_close_sync(&acc, &AlignOptions {
             align_automations: opts.align_automations,
             align_sessions: opts.align_sessions,
@@ -172,7 +190,7 @@ fn switch_account_inner(
             sync_projects: opts.sync_projects,
             slim_keep: opts.slim_keep,
             dry_run: false,
-        });
+        }, &protected);
         if align_report.is_some() {
             progress("正在执行设置同步与项目侧栏同步…");
         }
