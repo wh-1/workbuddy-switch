@@ -635,6 +635,49 @@ pub fn align_data(target_uid: &str, source_uid: Option<&str>, opts: &AlignOption
     report
 }
 
+/// 切号「关进程之后」的数据后置同步：归属/文件对齐 + 界面主题跟随。
+///
+/// 从 `switch.rs` 内联块下沉到这里（本地专属文件），使 switch.rs 的本地改动保持最小。
+/// 返回 `(align_report, theme_report)`；主题同步失败不影响切号（返回的 Value 里带 error）。
+pub fn post_close_sync(
+    target_acc: &Value,
+    align_automations: bool,
+    align_sessions: bool,
+    align_files: bool,
+) -> (Option<Value>, Option<Value>) {
+    let target_uid = account_uid(target_acc);
+    if target_uid.is_empty() || !(align_automations || align_sessions || align_files) {
+        return (None, None);
+    }
+    let source_uid = crate::modules::session::current_user_uid();
+    let opts = AlignOptions {
+        align_automations,
+        align_sessions,
+        align_files,
+        dry_run: false,
+    };
+    let align_report = Some(align_data(&target_uid, source_uid.as_deref(), &opts));
+
+    // 主题跟随账号：本地继承（leveldb 注入，启动瞬间生效）+ 云端继承
+    // （把 target 的云端外观选择改成 source 的值，根治回跳）。
+    let source_acc = source_uid.as_deref().and_then(|uid| {
+        crate::modules::account::load_accounts()
+            .into_iter()
+            .find(|a| account_uid(a) == uid)
+    });
+    let source_token = source_acc
+        .as_ref()
+        .and_then(|a| crate::modules::account::get_str(a, "access_token"));
+    let target_token = crate::modules::account::get_str(target_acc, "access_token");
+    let theme_report = Some(crate::modules::ui_theme::sync_theme_for_switch(
+        source_uid.as_deref(),
+        &target_uid,
+        source_token.as_deref(),
+        target_token.as_deref(),
+    ));
+    (align_report, theme_report)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

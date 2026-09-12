@@ -153,44 +153,21 @@ fn switch_account_inner(
             progress("正在复制会话到目标账号…");
             copy_report = session::copy_sessions_for_switch(&acc, &opts.copy_session_ids);
         }
-        let target_uid = align::account_uid(&acc);
-        if !target_uid.is_empty()
-            && (opts.align_automations || opts.align_sessions || opts.align_files)
-        {
-            let align_opts = AlignOptions {
-                align_automations: opts.align_automations,
-                align_sessions: opts.align_sessions,
-                align_files: opts.align_files,
-                dry_run: false,
-            };
-            // 文件层对齐源优先用当前登录账号（正在被切走的那个）
-            let source_uid = session::current_user_uid();
+        // 对齐 + 主题跟随（本地专属逻辑在 align::post_close_sync，switch.rs 保持薄）
+        let (align, theme) = align::post_close_sync(
+            &acc,
+            opts.align_automations,
+            opts.align_sessions,
+            opts.align_files,
+        );
+        if align.is_some() {
             progress("正在对齐数据归属到目标账号…");
-            align_report = Some(align::align_data(
-                &target_uid,
-                source_uid.as_deref(),
-                &align_opts,
-            ));
-            // 主题跟随账号（L6）：本地继承（leveldb 注入，启动瞬间生效）
-            // + 云端继承（把 target 的云端外观选择改成 source 的值，根治回跳）。
-            // 失败不阻断切号。
-            progress("正在同步目标账号界面主题…");
-            let source_acc = session::current_user_uid().and_then(|uid| {
-                account::load_accounts()
-                    .into_iter()
-                    .find(|a| align::account_uid(a) == uid)
-            });
-            let source_token = source_acc
-                .as_ref()
-                .and_then(|a| account::get_str(a, "access_token"));
-            let target_token = account::get_str(&acc, "access_token");
-            theme_report = Some(crate::modules::ui_theme::sync_theme_for_switch(
-                source_uid.as_deref(),
-                &target_uid,
-                source_token.as_deref(),
-                target_token.as_deref(),
-            ));
         }
+        if theme.is_some() {
+            progress("正在同步目标账号界面主题…");
+        }
+        align_report = align;
+        theme_report = theme;
         if opts.share_sessions {
             // 旧的「全体转移」兼容路径（默认关闭），Rust 版暂未实现
             session_report = Some(json!({"error": "share_sessions 兼容路径暂未在 Rust 版实现"}));

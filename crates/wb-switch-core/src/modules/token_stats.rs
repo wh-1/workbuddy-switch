@@ -759,19 +759,37 @@ fn ide_source(
 /// Return independent WorkBuddy, CodeBuddy CLI, and CodeBuddy IDE aggregates.
 /// `days` is interpreted in Rust using the same millisecond clock for every source.
 pub fn get_statistics(days: Option<i64>) -> Value {
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let generated_at = crate::modules::config::now_ms();
     let range_days = match days {
         Some(7) => Some(7),
         Some(30) => Some(30),
         Some(90) => Some(90),
         _ => None,
     };
-    let cutoff = range_days.map(|value| crate::modules::config::now_ms() - value * 86_400_000);
-    get_statistics_since(cutoff)
+    let cutoff = range_days.map(|value| generated_at - value * 86_400_000);
+    let ide_projects = ide_project_by_session();
+    json!({
+        "generatedAt": generated_at,
+        "rangeDays": range_days,
+        "sources": [
+            source(home.join(".workbuddy/projects"), "workbuddy", cutoff),
+            source(home.join(".codebuddy/projects"), "codebuddy-cli", cutoff),
+            ide_source(
+                codebuddy_extension_data_dir(),
+                "codebuddy-ide",
+                cutoff,
+                &ide_projects,
+            ),
+        ],
+    })
 }
 
-/// Same collection and accounting rules as [`get_statistics`], but with an
-/// explicit inclusive cutoff so callers can query windows outside the
-/// 7 / 30 / 90 whitelist (for example "today"). `None` means all history.
+/// 本地新增：与 [`get_statistics`] 完全相同的采集与口径，但接受**显式 cutoff**，
+/// 用于 7/30/90 白名单之外的时间窗（如「今日」）。
+///
+/// 刻意不复用 `get_statistics` 的代码、也不改动它一行 —— 让上游文件保持逐字原样，
+/// 把本地改动限制成「纯新增函数」，压缩与上游合并时的冲突面。
 pub fn get_statistics_since(cutoff: Option<i64>) -> Value {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     let generated_at = crate::modules::config::now_ms();

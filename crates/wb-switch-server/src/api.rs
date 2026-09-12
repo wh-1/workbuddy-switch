@@ -17,8 +17,8 @@ use rust_embed::RustEmbed;
 use serde_json::{json, Value};
 
 use wb_switch_core::modules::{
-    account, align, auth_file, checkin, codebuddy_cli, codebuddy_cn_ide, config, credit_usage, credits, discover,
-    export_import, oauth, process, refresh, rotate, session, switch, token_stats, travel, update,
+    account, auth_file, checkin, codebuddy_cli, codebuddy_cn_ide, config, credit_usage, credits, export_import,
+    oauth, process, refresh, rotate, session, switch, token_stats, travel, update,
 };
 
 /// WorkBuddy 运行状态缓存：Windows 上检测要跑 tasklist（慢），缓存几秒避免
@@ -57,8 +57,6 @@ pub fn router() -> Router {
     Router::new()
         .route("/api/status", get(api_status))
         .route("/api/accounts", get(api_accounts))
-        .route("/api/accounts/discover", get(api_discover_accounts))
-        .route("/api/accounts/adopt", post(api_adopt_account))
         .route("/api/codebuddy-cli/status", get(api_codebuddy_cli_status))
         .route(
             "/api/codebuddy-cli/install-helper",
@@ -83,8 +81,6 @@ pub fn router() -> Router {
         .route("/api/switch/progress", get(api_switch_progress))
         .route("/api/sessions", get(api_sessions))
         .route("/api/sessions/copy", post(api_copy_sessions))
-        .route("/api/automations/align", post(api_align_automations))
-        .route("/api/align/data", post(api_align_data))
         .route("/api/checkin/status", get(api_checkin_status))
         .route("/api/credits", post(api_credits))
         .route("/api/credits/stats", get(api_credit_statistics))
@@ -115,6 +111,8 @@ pub fn router() -> Router {
             get(api_update_config).post(api_save_update_config),
         )
         .fallback(static_handler)
+        // 本地新增接口（账号发现 / 补录、数据对齐）集中在 api_local.rs
+        .merge(crate::api_local::router())
 }
 
 fn json_ok(v: Value) -> Response {
@@ -157,27 +155,6 @@ async fn api_accounts() -> Response {
         "current": auth_file::read_auth_file()
             .and_then(|a| a.get("account").and_then(|x| x.get("uid")).and_then(|x| x.as_str()).map(String::from)),
     }))
-}
-
-/// GET /api/accounts/discover —— 识别本机曾登录/留有数据的账号（对照在册）。
-async fn api_discover_accounts() -> Response {
-    json_ok(discover::discover_known_accounts())
-}
-
-/// POST /api/accounts/adopt —— 用最新 auth 历史备份补录指定 uid 进账号库。
-async fn api_adopt_account(Json(body): Json<Value>) -> Response {
-    let uid = body
-        .get("uid")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    if uid.trim().is_empty() {
-        return json_err("缺少 uid".to_string(), StatusCode::BAD_REQUEST);
-    }
-    match discover::adopt_account(&uid) {
-        Ok(meta) => json_ok(json!({ "ok": true, "account": meta })),
-        Err(error) => json_err(error, StatusCode::BAD_REQUEST),
-    }
 }
 
 async fn api_codebuddy_cli_status() -> Response {
@@ -426,67 +403,6 @@ async fn api_copy_sessions(Json(body): Json<Value>) -> Response {
         "targetUid": target.get("uid"),
         "copied": result,
     }))
-}
-
-/// POST /api/automations/align —— 自动化归属对齐（不切号）。需先完全退出 WorkBuddy。
-async fn api_align_automations(Json(body): Json<Value>) -> Response {
-    let account_id = body
-        .get("accountId")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    if account_id.trim().is_empty() {
-        return json_err("缺少 accountId".to_string(), StatusCode::BAD_REQUEST);
-    }
-    let Some(target) = account::find_account(&account_id) else {
-        return json_err("账号不存在".to_string(), StatusCode::BAD_REQUEST);
-    };
-    let uid = align::account_uid(&target);
-    if uid.is_empty() {
-        return json_err("该账号缺少 uid，无法对齐".to_string(), StatusCode::BAD_REQUEST);
-    }
-    match align::align_automations_owner(&uid) {
-        Some(v) => json_ok(v),
-        None => json_err("workbuddy.db 不存在".to_string(), StatusCode::BAD_REQUEST),
-    }
-}
-
-/// POST /api/align/data —— 多账号数据全量对齐（L1/L3/L4/L5），dryRun=true 只预览。
-async fn api_align_data(Json(body): Json<Value>) -> Response {
-    let account_id = body
-        .get("accountId")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    if account_id.trim().is_empty() {
-        return json_err("缺少 accountId".to_string(), StatusCode::BAD_REQUEST);
-    }
-    let Some(target) = account::find_account(&account_id) else {
-        return json_err("账号不存在".to_string(), StatusCode::BAD_REQUEST);
-    };
-    let uid = align::account_uid(&target);
-    if uid.is_empty() {
-        return json_err("该账号缺少 uid，无法对齐".to_string(), StatusCode::BAD_REQUEST);
-    }
-    let opts = align::AlignOptions {
-        align_automations: body
-            .get("alignAutomations")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true),
-        align_sessions: body
-            .get("alignSessions")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
-        align_files: body
-            .get("alignFiles")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
-        dry_run: body
-            .get("dryRun")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
-    };
-    json_ok(align::align_data(&uid, None, &opts))
 }
 
 // ---------------------------------------------------------------------------
