@@ -48,4 +48,4 @@ Managed by Trellis. Edits outside this block are preserved; edits inside may be 
 - 上下文卫生：命令输出必限流（`| head` / `--limit`），大文件先 Grep 定位再分段读，不在对话里贴大段代码。
 - 压缩 ≥2 次 → 立刻收尾换会话。
 
-> 通用规则本体（五条硬规则 / 通用序列 / 四件套规范 / 工具层坑位）在 `C:\Users\WH\.workbuddy\skills\context-discipline\SKILL.md`（junction 指向本体仓库，改一处全局生效），**不在本项目复制**。
+> 通用规则本体（五条硬规则 / 通用序列 / 四件套规范 / 工具层坑位）在 `~/.workbuddy/skills/context-discipline/SKILL.md`（junction 指向本体仓库，改一处全局生效），**不在本项目复制**。

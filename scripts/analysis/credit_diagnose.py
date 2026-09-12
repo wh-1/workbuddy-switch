@@ -6,16 +6,22 @@
 
 数据源（全部本地、只读）：
   1. ~/.workbuddy/workbuddy.db  session_usage 表
-     - credit_json: {traceId: 积分}  ← 真实的积分消耗明细（官方记账）
+     - credit_json: {join_key: 积分}  ← 真实的积分消耗明细（官方记账）
      - size: 上下文窗口大小, used: 已用
   2. ~/.workbuddy/projects/**/*.jsonl  （排除 subagents/）
-     - providerData.traceId / model / usage.{inputTokens,outputTokens,...}
-     - 通过 traceId 把积分精确关联到 模型 / 项目 / 会话 / 时间
+     - providerData.conversationRequestId / model / usage.{inputTokens,outputTokens,...}
+     - 通过 conversationRequestId 把积分精确关联到 模型 / 项目 / 会话 / 时间
 
 设计口径：
   - 积分 = 服务端记账（credit_json），绝对权威
   - Token = 从 JSONL 派生（本机请求记录）
-  - 二者通过 traceId join，可实现「按模型/项目 分摊积分」
+  - 二者通过 **conversationRequestId**（不是 traceId）join，可实现「按模型/项目 分摊积分」
+
+⚠️ traceId ≠ 积分 key：二者都是 32 字符 hex，但属于不同 ID 空间。
+   providerData.traceId 是「单条请求的客户端记录 ID」；
+   providerData.conversationRequestId 才是「服务端记账会话 ID」，
+   与 credit_json 的键完全对齐（实测 100% 命中，0 积分未归属）。
+   早期版本误用 traceId，导致 220 个积分键中 0 个命中（错配率 100%）。
 
 用法：
   python credit_diagnose.py                 # 全量
@@ -154,7 +160,7 @@ def scan_jsonl(cutoff_ms=None):
                         continue
                     records.append(
                         {
-                            "trace_id": pd.get("traceId") or "",
+                            "join_key": pd.get("conversationRequestId") or "",
                             "model": pd.get("model") or "(unknown)",
                             "agent": pd.get("agent") or "(unknown)",
                             "project": project,
@@ -213,8 +219,8 @@ def report(records, credits, days):
     print(f"  （本机 credit_json 记录总数 {len(credits):,}，"
           f"其中落在范围内 {len(cred_items):,}）")
 
-    # 归因覆盖率：有多少去重 traceId 有积分记录
-    jsonl_traces = {r["trace_id"] for r in records if r["trace_id"]}
+    # 归因覆盖率：有多少去重 join_key 有积分记录
+    jsonl_traces = {r["join_key"] for r in records if r["join_key"]}
     covered = jsonl_traces & set(credits.keys())
     if jsonl_traces:
         cov = len(covered) / len(jsonl_traces) * 100
@@ -250,15 +256,15 @@ def report(records, credits, days):
     by_model = defaultdict(lambda: {"total": 0.0, "input": 0.0, "output": 0.0,
                                     "cached": 0.0, "reqs": 0, "credit": 0.0})
     cred_by_trace = {tid: c for tid, c, _, _ in cred_items}
-    # 积分必须按「唯一 traceId」归属一次，否则 JSONL 里同一 traceId 的多条
+    # 积分必须按「唯一 join_key」归属一次，否则 JSONL 里同一 join_key 的多条
     # 记录（一次请求会写入多条：reasoning/function_call/message 等）会重复累加。
     model_of_trace = {}
     proj_of_trace = {}
     for r in records:
-        tid = r["trace_id"]
-        if tid and tid not in model_of_trace:
-            model_of_trace[tid] = r["model"]
-            proj_of_trace[tid] = r["project"]
+        jk = r["join_key"]
+        if jk and jk not in model_of_trace:
+            model_of_trace[jk] = r["model"]
+            proj_of_trace[jk] = r["project"]
     for r in records:
         m = by_model[r["model"]]
         m["total"] += r["total"]

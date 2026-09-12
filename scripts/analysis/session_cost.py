@@ -6,7 +6,7 @@
   - Token / 命中率  → 调用 wb-switch-core 的 token_stats::get_statistics
                       （经 examples/dump_stats.rs 导出，口径与「Token 统计」页一致）
   - 积分            → workbuddy.db 的 session_usage.credit_json
-                      （该表天然按会话存储：每行一个会话，值为 {traceId: 积分}）
+                      （该表天然按会话存储：每行一个会话，值为 {conversationRequestId: 积分}）
 
 三个指标都以**对话**为单位；`--by-account` 追加一张按账号分摊表。
 
@@ -185,6 +185,108 @@ def attribute_by_account(days: int | None, credits: dict) -> tuple[list[dict], d
     return rows, meta
 
 
+def load_trace_credits() -> dict:
+    """返回 {join_key: 积分}（跨会话去重，同一 join_key 取最大值）。
+
+    用于把积分精确落到「账号 × 模型」——credit_json 的键即 join_key。
+    join_key 实测是 providerData.conversationRequestId（不是 traceId）；
+    二者都是 32 字符 hex 但属于不同 ID 空间（见 credit_diagnose.py 注释）。
+    """
+    if not os.path.exists(DB_PATH):
+        return {}
+    uri = "file:" + DB_PATH.replace("\\", "/") + "?mode=ro"
+    con = sqlite3.connect(uri, uri=True, timeout=5)
+    out: dict[str, float] = {}
+    try:
+        for (raw,) in con.execute("SELECT credit_json FROM session_usage"):
+            if not raw:
+                continue
+            try:
+                data = json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+            for tid, val in data.items():
+                try:
+                    credit = float(val)
+                except (TypeError, ValueError):
+                    continue
+                prev = out.get(tid)
+                if prev is None or credit > prev:
+                    out[tid] = credit
+    finally:
+        con.close()
+    return out
+
+
+def attribute_by_model(days: int | None, trace_credits: dict) -> tuple[list[dict], dict]:
+    """按「账号 × 模型」分摊 Token 与积分。
+
+    为什么要按模型拆：积分单价随模型不同（glm-5.3 与 hy3 差好几倍），
+    跨账号比「积分/百万 token」其实比的是**模型组合**，不是账号本身。拆到
+    (账号, 模型) 后才能 apples-to-apples 比较，并回答「同一模型下哪个账号更划算」。
+
+    积分 join：`session_usage.credit_json` 的键是 conversationRequestId（实测
+    100% 命中 220/220），JSONL 记录带 `providerData.conversationRequestId` 与
+    `providerData.model` → 可把每笔积分精确落到 (账号, 模型)。同一 join_key 的
+    多条记录模型一致，故归属无歧义。
+    """
+    import collections
+
+    cutoff = (
+        int((dt.datetime.now() - dt.timedelta(days=days)).timestamp() * 1000)
+        if days
+        else None
+    )
+    events, names = at.load_account_timeline()
+    tokens: collections.Counter = collections.Counter()
+    records: collections.Counter = collections.Counter()
+    trace_owner: dict[str, tuple[str | None, str]] = {}
+    for _sid, ts, tok, model, tid in at.scan_records_full(cutoff):
+        acct = at.account_at(events, ts)
+        tokens[(acct, model)] += tok
+        records[(acct, model)] += 1
+        if tid and tid not in trace_owner:
+            trace_owner[tid] = (acct, model)
+
+    credit: collections.Counter = collections.Counter()
+    unassigned = 0.0
+    for tid, amount in trace_credits.items():
+        owner = trace_owner.get(tid)
+        if owner is None:
+            unassigned += amount
+            continue
+        credit[owner] += amount
+
+    rows = []
+    for (acct, model), tok in tokens.items():
+        cred = credit.get((acct, model), 0.0)
+        rows.append(
+            {
+                "account": at.label(acct, names),
+                "model": model,
+                "tokens": tok,
+                "records": records.get((acct, model), 0),
+                "credits": round(cred, 3),
+                "creditsPerMillion": round(cred / (tok / 1e6), 3) if tok else 0.0,
+            }
+        )
+    for (acct, model), cred in credit.items():
+        if (acct, model) in tokens:
+            continue
+        rows.append(
+            {
+                "account": at.label(acct, names),
+                "model": model,
+                "tokens": 0,
+                "records": 0,
+                "credits": round(cred, 3),
+                "creditsPerMillion": 0.0,
+            }
+        )
+    rows.sort(key=lambda r: -r["credits"])
+    return rows, {"unassignedCredits": round(unassigned, 2), "traceOwners": len(trace_owner)}
+
+
 def fmt(n: float) -> str:
     if n >= 1e9:
         return f"{n/1e9:.2f}B"
@@ -212,6 +314,8 @@ def main() -> int:
                     help="数据源（默认 workbuddy）")
     ap.add_argument("--by-account", action="store_true",
                     help="追加按账号分摊表（时间轴归因）")
+    ap.add_argument("--by-model", action="store_true",
+                    help="追加「账号 × 模型」分摊表（积分按 conversationRequestId 精确 join）")
     args = ap.parse_args()
 
     days = args.days if args.days and args.days > 0 else None
@@ -322,6 +426,50 @@ def main() -> int:
         print("  · ⚠️ 用过「复制会话」会致同一批 usage 重复出现 → Token 偏高")
         print()
 
+    by_model = None
+    if args.by_model:
+        by_model, meta_m = attribute_by_model(days, load_trace_credits())
+        total_tok = sum(r["tokens"] for r in by_model)
+        total_cred = sum(r["credits"] for r in by_model)
+        print("=" * 92)
+        print("  账号 × 模型 分摊（积分按 conversationRequestId 精确 join；Token 按记录时刻归因）")
+        print("=" * 92)
+        coverage = 100.0 if meta_m["unassignedCredits"] == 0 and total_cred else (
+            total_cred / (total_cred + meta_m["unassignedCredits"]) * 100
+        )
+        print(f"  模型数 {len({r['model'] for r in by_model})}  ·  "
+              f"积分 join 覆盖率 {coverage:.1f}%"
+              f"（未归属 {meta_m['unassignedCredits']:,.2f} 积分 = "
+              f"对应会话 JSONL 已不在本地）")
+        print()
+        print("-" * 92)
+        print(f"  {'账号':<10}{'模型':<18}{'Token':>10}{'占比':>8}{'积分':>10}{'占比':>8}"
+              f"{'积分/百万':>11}{'调用':>7}")
+        print("-" * 92)
+        for r in by_model:
+            tok_share = (r["tokens"] / total_tok * 100) if total_tok else 0
+            cred_share = (r["credits"] / total_cred * 100) if total_cred else 0
+            print(f"  {r['account']:<10}{r['model'][:17]:<18}{fmt(r['tokens']):>10}"
+                  f"{tok_share:>7.1f}%{r['credits']:>10.2f}{cred_share:>7.1f}%"
+                  f"{r['creditsPerMillion']:>11.2f}{r['records']:>7}")
+        print("-" * 92)
+
+        # 同一模型跨账号对比：单价应一致（官方定价），差异即来自缓存命中率/计费差异
+        bym: dict[str, list[dict]] = {}
+        for r in by_model:
+            if r["tokens"] > 0:
+                bym.setdefault(r["model"], []).append(r)
+        shared = {m: rs for m, rs in bym.items() if len(rs) > 1}
+        if shared:
+            print("  同模型跨账号对比（单价本应一致，差异来自缓存命中率/计费）")
+            for model, rs in sorted(shared.items(), key=lambda kv: -sum(r["credits"] for r in kv[1])):
+                detail = "  ".join(
+                    f"{r['account']}={r['creditsPerMillion']:.2f}" for r in sorted(rs, key=lambda r: -r["tokens"])
+                )
+                print(f"    · {model[:24]:<24} {detail}")
+        print("  · 结论应以「同一模型下账号单价」为准；跨账号总量差异主要由模型组合决定")
+        print()
+
     if args.json:
         out = {
             "range_days": days,
@@ -331,6 +479,8 @@ def main() -> int:
         }
         if by_account is not None:
             out["by_account"] = by_account
+        if by_model is not None:
+            out["by_model"] = by_model
         with open(args.json, "w", encoding="utf-8") as fh:
             json.dump(out, fh, ensure_ascii=False, indent=2)
         print(f"  JSON 已写入 {args.json}")
