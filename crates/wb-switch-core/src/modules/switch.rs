@@ -148,10 +148,9 @@ fn switch_account_inner(
     let backup = auth_file::backup_auth_file();
 
     // 预览模式：不关 App、不写库、不写凭据，只算对齐计划
+    // （含项目侧栏同步与会话瘦身——这两项是破坏性的，必须先可预览）
     if opts.dry_run {
         progress("预览模式：统计将对齐的数据…");
-        let target_uid = align::account_uid(&acc);
-        let source_uid = session::current_user_uid();
         let align_opts = AlignOptions {
             align_automations: opts.align_automations,
             align_sessions: opts.align_sessions,
@@ -160,7 +159,9 @@ fn switch_account_inner(
             slim_keep: opts.slim_keep,
             dry_run: true,
         };
-        let align_data = align::align_data(&target_uid, source_uid.as_deref(), &align_opts);
+        let align_data = align::preview_sync(&acc, &align_opts).unwrap_or_else(|| {
+            json!({ "dryRun": true, "noop": true, "targetUid": align::account_uid(&acc) })
+        });
         return Ok(json!({
             "ok": true,
             "dryRun": true,

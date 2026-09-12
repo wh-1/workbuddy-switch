@@ -153,7 +153,17 @@ export interface AlignDataReport {
     error?: string;
   };
   /** 「会话瘦身」：每项目保留最近 N 条。 */
-  slim?: { uid?: string; keep?: number; planned?: number; deleted?: number; error?: string };
+  slim?: {
+    uid?: string;
+    keep?: number;
+    planned?: number;
+    deleted?: number;
+    /** 受保护的会话数（本次复制体，既不被删也不占名额）。 */
+    excluded?: number;
+    /** 每个项目将被删除的条数。 */
+    groups?: { cwd: string; count: number }[];
+    error?: string;
+  };
 }
 
 export interface CheckinConfig {

@@ -88,6 +88,13 @@ export function AlignOptionsPanel({ value, onChange, previewLines }: Props) {
   );
 }
 
+/** 取路径最后一段做项目名（`D:\w-dev\x` → `x`）。 */
+function basename(cwd: string): string {
+  const norm = cwd.replace(/[\\/]+$/, "");
+  const i = Math.max(norm.lastIndexOf("\\"), norm.lastIndexOf("/"));
+  return i >= 0 ? norm.slice(i + 1) : norm;
+}
+
 /** 把对齐报告渲染成人类可读的行（预览与切换完成提示共用）。 */
 export function formatAlignReport(r: AlignDataReport): string[] {
   if (r.error) return [`对齐出错：${r.error}`];
@@ -123,10 +130,28 @@ export function formatAlignReport(r: AlignDataReport): string[] {
       lines.push(
         `项目侧栏：待补 ${r.projects.addedCount ?? 0} 个占位，待删 ${r.projects.removedCount ?? 0} 条多余对话`,
       );
+    // 破坏性操作：列出将被删空的项目（最多 3 个）
+    const rm = r.projects.removedProjects ?? [];
+    if (rm.length) {
+      const names = rm
+        .slice(0, 3)
+        .map((x) => `${basename(x.cwd)}(${x.sessions})`)
+        .join("、");
+      lines.push(`　将清空：${names}${rm.length > 3 ? ` 等 ${rm.length} 个项目` : ""}`);
+    }
   }
   if (r.slim) {
     if (r.slim.error) lines.push(`会话瘦身出错：${r.slim.error}`);
     else lines.push(`会话瘦身：每项目留 ${r.slim.keep ?? 1} 条，待删 ${r.slim.planned ?? 0} 条`);
+    const gs = r.slim.groups ?? [];
+    if (gs.length) {
+      const names = gs
+        .slice(0, 3)
+        .map((g) => `${basename(g.cwd)}(${g.count})`)
+        .join("、");
+      lines.push(`　涉及：${names}${gs.length > 3 ? ` 等 ${gs.length} 个项目` : ""}`);
+    }
+    if (r.dryRun) lines.push("　实际执行时本次复制的对话会被跳过，删除数可能更少");
   }
   lines.push(r.dryRun ? "以上为预览结果，尚未落盘" : "对齐完成（已先备份 db 与 settings）");
   return lines;

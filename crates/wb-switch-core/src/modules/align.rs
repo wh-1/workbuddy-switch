@@ -646,6 +646,72 @@ pub fn align_data(target_uid: &str, source_uid: Option<&str>, opts: &AlignOption
     report
 }
 
+/// 项目侧栏同步 + 会话瘦身，追加进报告（真实执行与预览共用）。
+///
+/// 顺序固定：先补占位/删多余，再瘦身（占位行也纳入瘦身统计）。
+/// `protected_ids` = 本次复制体，瘦身时跳过（不删、也不占保留名额）。
+fn append_project_and_slim(
+    report: &mut Value,
+    target_uid: &str,
+    source_uid: Option<&str>,
+    opts: &AlignOptions,
+    dry_run: bool,
+    protected_ids: &[String],
+) {
+    if opts.sync_projects {
+        if let Some(src) = source_uid {
+            match crate::modules::projects_anchor::sync_project_set(src, target_uid, dry_run, false) {
+                Ok(r) => report["projects"] = r,
+                Err(e) => report["projects"] = json!({ "error": e }),
+            }
+        }
+    }
+    if opts.slim_keep > 0 {
+        match crate::modules::projects_anchor::slim_sessions(
+            target_uid,
+            opts.slim_keep,
+            dry_run,
+            protected_ids,
+        ) {
+            Ok(r) => report["slim"] = r,
+            Err(e) => report["slim"] = json!({ "error": e }),
+        }
+    }
+}
+
+/// 切号预览（dry_run）：统计「对齐 + 项目侧栏 + 会话瘦身」将发生的变更。
+///
+/// 与 [`post_close_sync`] 的区别：**不写库、不写快照、不写云端**。
+/// 主题跟随只给出提示占位——`sync_theme_for_switch` 会写 leveldb 与云端主题，
+/// 预览阶段绝不能调用。
+pub fn preview_sync(target_acc: &Value, opts: &AlignOptions) -> Option<Value> {
+    let target_uid = account_uid(target_acc);
+    if target_uid.is_empty()
+        || !(opts.align_automations || opts.align_sessions || opts.align_files || opts.sync_projects || opts.slim_keep > 0)
+    {
+        return None;
+    }
+    let source_uid = crate::modules::session::current_user_uid();
+    let mut dry_opts = opts.clone();
+    dry_opts.dry_run = true;
+    let mut report = align_data(&target_uid, source_uid.as_deref(), &dry_opts);
+    report["dryRun"] = json!(true);
+
+    append_project_and_slim(
+        &mut report,
+        &target_uid,
+        source_uid.as_deref(),
+        opts,
+        true,
+        &[], // 预览不复制，无保护名单；真实执行时会跳过复制体，实际删除数可能更少
+    );
+
+    if opts.align_files {
+        report["settings"]["theme"] = json!({ "planned": true });
+    }
+    Some(report)
+}
+
 /// 切号「关进程之后」的数据后置同步：归属/文件对齐 + 界面主题跟随。
 ///
 /// 从 `switch.rs` 内联块下沉到这里（本地专属文件），使 switch.rs 的本地改动保持最小。
@@ -669,29 +735,15 @@ pub fn post_close_sync(
     full_opts.dry_run = false;
     let mut report = align_data(&target_uid, source_uid.as_deref(), &full_opts);
 
-    // 同步项目侧栏：目标账号项目集合对齐到源账号（补缺占位 + 多余软删）。
-    if opts.sync_projects {
-        if let Some(src) = source_uid.as_deref() {
-            match crate::modules::projects_anchor::sync_project_set(src, &target_uid, false, false) {
-                Ok(r) => report["projects"] = r,
-                Err(e) => report["projects"] = json!({ "error": e }),
-            }
-        }
-    }
-
-    // 会话瘦身：每项目保留最近 N 条存活会话（放在项目同步之后，占位行也会纳入统计）。
-    // 排除本次复制体：既不被删、也不占保留名额（见 post_close_sync 文档）。
-    if opts.slim_keep > 0 {
-        match crate::modules::projects_anchor::slim_sessions(
-            &target_uid,
-            opts.slim_keep,
-            false,
-            protected_ids,
-        ) {
-            Ok(r) => report["slim"] = r,
-            Err(e) => report["slim"] = json!({ "error": e }),
-        }
-    }
+    // 项目侧栏同步 + 会话瘦身（真实执行与预览共用，见 append_project_and_slim）。
+    append_project_and_slim(
+        &mut report,
+        &target_uid,
+        source_uid.as_deref(),
+        opts,
+        false,
+        protected_ids,
+    );
 
     // 主题跟随账号：本地继承（leveldb 注入，启动瞬间生效）+ 云端继承
     // （把 target 的云端外观选择改成 source 的值，根治回跳）。并入「设置同步」。
