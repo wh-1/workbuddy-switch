@@ -12,6 +12,7 @@ use serde_json::{json, Value};
 use crate::modules::account;
 use crate::modules::align::{self, AlignOptions};
 use crate::modules::auth_file;
+use crate::modules::oplog;
 use crate::modules::process::{close_workbuddy, launch_workbuddy};
 use crate::modules::session;
 
@@ -64,7 +65,46 @@ impl Default for SwitchOptions {
 }
 
 /// 切换账号。
+///
+/// 薄包装：调用 [`switch_account_inner`] 做实际切换，并把结果留痕到
+/// `~/.wb-switch/switch_logs.json`（见 `oplog` 模块）。留痕失败不影响切换结果。
 pub fn switch_account(
+    progress_fn: Option<&ProgressFn>,
+    account_id: &str,
+    opts: &SwitchOptions,
+) -> Result<Value, String> {
+    let from_uid = session::current_user_uid();
+    let to_uid = account::find_account(account_id)
+        .map(|acc| align::account_uid(&acc))
+        .unwrap_or_default();
+    let outcome = switch_account_inner(progress_fn, account_id, opts);
+    let log_options = json!({
+        "copySessions": opts.copy_session_ids.len(),
+        "alignAutomations": opts.align_automations,
+        "alignSessions": opts.align_sessions,
+        "alignFiles": opts.align_files,
+        "restart": opts.restart,
+    });
+    match &outcome {
+        Ok(result) => oplog::add_switch_log(&oplog::switch_log_entry(
+            if opts.dry_run { "dry-run" } else { "switch" },
+            from_uid.as_deref(),
+            &to_uid,
+            &log_options,
+            result,
+        )),
+        Err(err) => oplog::add_switch_log(&oplog::switch_log_entry(
+            "error",
+            from_uid.as_deref(),
+            &to_uid,
+            &log_options,
+            &json!({ "ok": false, "error": err }),
+        )),
+    }
+    outcome
+}
+
+fn switch_account_inner(
     progress_fn: Option<&ProgressFn>,
     account_id: &str,
     opts: &SwitchOptions,

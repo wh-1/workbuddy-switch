@@ -11,6 +11,7 @@ pub mod discover;
 pub mod export_import;
 pub mod oauth;
 pub mod official_usage;
+pub mod oplog;
 pub mod process;
 pub mod refresh;
 pub mod rotate;
