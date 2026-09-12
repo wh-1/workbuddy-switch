@@ -255,7 +255,8 @@ fn align_automations_owner_in_db(
 
 /// 低层：对齐 sessions.user_id + 清理遗留触发器，返回 (sessions 行数, 是否移除触发器)。
 ///
-/// 与 multi_sync L3 口径一致：user_id 非空且 != 目标的行全部对齐（含软删行，保持简单）。
+/// 与 multi_sync L3 口径一致：user_id 非空且 != 目标的**存活**行对齐；软删行（deleted_at 非空）
+/// 不改写——已删除对话不参与任何上下文/统计展示，改写归属无意义，且保留原值可作对齐痕迹回溯。
 fn align_sessions_owner_in_db(
     db_path: &Path,
     target_uid: &str,
@@ -273,7 +274,8 @@ fn align_sessions_owner_in_db(
 
     let n: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM sessions WHERE user_id IS NOT NULL AND user_id != ?1",
+            "SELECT COUNT(*) FROM sessions \
+             WHERE deleted_at IS NULL AND user_id IS NOT NULL AND user_id != ?1",
             rusqlite::params![target_uid],
             |r| r.get(0),
         )
@@ -281,7 +283,7 @@ fn align_sessions_owner_in_db(
     if n > 0 && !dry_run {
         conn.execute(
             "UPDATE sessions SET user_id = ?1, updated_at = ?2 \
-             WHERE user_id IS NOT NULL AND user_id != ?1",
+             WHERE deleted_at IS NULL AND user_id IS NOT NULL AND user_id != ?1",
             rusqlite::params![target_uid, now_ms()],
         )
         .map_err(|e| e.to_string())?;
