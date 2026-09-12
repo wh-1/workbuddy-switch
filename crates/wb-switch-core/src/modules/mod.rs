@@ -5,6 +5,7 @@ pub mod checkin;
 pub mod codebuddy_cli;
 pub mod codebuddy_cn_ide;
 pub mod config;
+pub mod credit_ledger;
 pub mod credit_usage;
 pub mod credits;
 pub mod discover;
