@@ -117,22 +117,26 @@ def scan_records(cutoff_ms: int | None = None):
     tokens = input + output（与项目 total 口径一致，仅用于**账号归因的比例**，
     绝对总量仍以 Rust 侧 dump_stats 为准）。
 
-    需要模型 / traceId 时用 scan_records_full()。
+    需要模型 / join_key / cacheRead 时用 scan_records_full()。
     """
-    for sid, ts, tokens, _model, _tid in scan_records_full(cutoff_ms):
+    for sid, ts, tokens, _model, _tid, _cr in scan_records_full(cutoff_ms):
         yield sid, ts, tokens
 
 
 def scan_records_full(cutoff_ms: int | None = None):
-    """同上，但额外产出模型名与积分 join key（用于「账号 × 模型」分摊）。
+    """同上，但额外产出模型名 / 积分 join key / cacheRead（用于账号×模型分摊）。
 
-    产出 (session_id, ts_ms, tokens, model, join_key)。
+    产出 (session_id, ts_ms, tokens, model, join_key, cache_read)。
 
     **join_key = providerData.conversationRequestId**（不是 providerData.traceId）：
     实测 credit_json 的键与 traceId 字符格式完全相同（都是 32 字符 hex），
     但属于不同 ID 空间；积分 key 真实对应 conversationRequestId（100% 命中，
     全量 220/220 命中，0 积分未归属）。traceId 是「单条请求的客户端记录 ID」，
     conversationRequestId 是「服务端记账/审计会话 ID」，后者跟计费系统对齐。
+
+    **cache_read**：官方积分计费口径按「未命中 input + output」（实测验证：
+    同账号内 积分/计费token ÷ 官方倍率 ≈ 账号常数，误差 ±11%；total 口径
+    则比例紊乱）。做计费对比时用 billed = (input - cache_read) + output。
 
     模型取 providerData.model（官方请求模型）。
     """
@@ -158,7 +162,13 @@ def scan_records_full(cutoff_ms: int | None = None):
                     continue
                 prov = v.get("providerData") or {}
                 model = prov.get("model") or prov.get("requestModelName") or "未知模型"
-                tokens = _num(usage, "input", "input_tokens") + _num(
-                    usage, "output", "output_tokens"
+                inp = _num(usage, "input", "input_tokens")
+                out = _num(usage, "output", "output_tokens")
+                cache_read = _num(
+                    usage,
+                    "cacheRead", "cache_read_input_tokens",
+                    "cached_input_tokens", "cache_read",
                 )
-                yield sid, int(ts), tokens, str(model), prov.get("conversationRequestId")
+                yield sid, int(ts), inp + out, str(model), prov.get(
+                    "conversationRequestId"
+                ), cache_read

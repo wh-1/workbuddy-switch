@@ -229,6 +229,13 @@ def attribute_by_model(days: int | None, trace_credits: dict) -> tuple[list[dict
     100% 命中 220/220），JSONL 记录带 `providerData.conversationRequestId` 与
     `providerData.model` → 可把每笔积分精确落到 (账号, 模型)。同一 join_key 的
     多条记录模型一致，故归属无歧义。
+
+    双口径单价：
+      - 积分/百万(total)   分母 = input(含cacheRead) + output —— 用量强度
+      - 积分/百万(计费)    分母 = (input - cacheRead) + output —— 贴近官方计费口径。
+        实测同账号内「计费口径单价 ÷ 官方倍率」≈ 账号常数（±11%），
+        即：积分 ≈ 官方倍率 × 计费token × 账号常数；账号常数越小 =
+        套餐承担比例越高。跨账号比单价仍无意义，比的是套餐折损。
     """
     import collections
 
@@ -239,11 +246,13 @@ def attribute_by_model(days: int | None, trace_credits: dict) -> tuple[list[dict
     )
     events, names = at.load_account_timeline()
     tokens: collections.Counter = collections.Counter()
+    billed: collections.Counter = collections.Counter()
     records: collections.Counter = collections.Counter()
     trace_owner: dict[str, tuple[str | None, str]] = {}
-    for _sid, ts, tok, model, tid in at.scan_records_full(cutoff):
+    for _sid, ts, tok, model, tid, cache_read in at.scan_records_full(cutoff):
         acct = at.account_at(events, ts)
         tokens[(acct, model)] += tok
+        billed[(acct, model)] += max(0, tok - cache_read)
         records[(acct, model)] += 1
         if tid and tid not in trace_owner:
             trace_owner[tid] = (acct, model)
@@ -260,14 +269,17 @@ def attribute_by_model(days: int | None, trace_credits: dict) -> tuple[list[dict
     rows = []
     for (acct, model), tok in tokens.items():
         cred = credit.get((acct, model), 0.0)
+        bil = billed.get((acct, model), 0)
         rows.append(
             {
                 "account": at.label(acct, names),
                 "model": model,
                 "tokens": tok,
+                "billed": bil,
                 "records": records.get((acct, model), 0),
                 "credits": round(cred, 3),
                 "creditsPerMillion": round(cred / (tok / 1e6), 3) if tok else 0.0,
+                "creditsPerMillionBilled": round(cred / (bil / 1e6), 3) if bil else 0.0,
             }
         )
     for (acct, model), cred in credit.items():
@@ -278,9 +290,11 @@ def attribute_by_model(days: int | None, trace_credits: dict) -> tuple[list[dict
                 "account": at.label(acct, names),
                 "model": model,
                 "tokens": 0,
+                "billed": 0,
                 "records": 0,
                 "credits": round(cred, 3),
                 "creditsPerMillion": 0.0,
+                "creditsPerMillionBilled": 0.0,
             }
         )
     rows.sort(key=lambda r: -r["credits"])
@@ -442,17 +456,18 @@ def main() -> int:
               f"（未归属 {meta_m['unassignedCredits']:,.2f} 积分 = "
               f"对应会话 JSONL 已不在本地）")
         print()
-        print("-" * 92)
-        print(f"  {'账号':<10}{'模型':<18}{'Token':>10}{'占比':>8}{'积分':>10}{'占比':>8}"
-              f"{'积分/百万':>11}{'调用':>7}")
-        print("-" * 92)
+        print("-" * 104)
+        print(f"  {'账号':<10}{'模型':<18}{'Token':>10}{'计费Tok':>9}{'积分':>9}"
+              f"{'积/百万':>9}{'积/百万*':>10}{'调用':>7}")
+        print("-" * 104)
         for r in by_model:
-            tok_share = (r["tokens"] / total_tok * 100) if total_tok else 0
-            cred_share = (r["credits"] / total_cred * 100) if total_cred else 0
             print(f"  {r['account']:<10}{r['model'][:17]:<18}{fmt(r['tokens']):>10}"
-                  f"{tok_share:>7.1f}%{r['credits']:>10.2f}{cred_share:>7.1f}%"
-                  f"{r['creditsPerMillion']:>11.2f}{r['records']:>7}")
-        print("-" * 92)
+                  f"{fmt(r['billed']):>9}{r['credits']:>9.2f}"
+                  f"{r['creditsPerMillion']:>9.2f}{r['creditsPerMillionBilled']:>10.2f}"
+                  f"{r['records']:>7}")
+        print("-" * 104)
+        print("  · 积/百万* = 积分 / 计费token(未命中input+output)，贴近官方计费口径")
+        print("  · 同账号内「积/百万* ÷ 官方倍率」≈ 账号常数；常数越小 = 套餐承担越多")
 
         # 同一模型跨账号对比：单价应一致（官方定价），差异即来自缓存命中率/计费差异
         bym: dict[str, list[dict]] = {}
