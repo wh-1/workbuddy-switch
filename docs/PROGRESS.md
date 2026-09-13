@@ -123,3 +123,20 @@
 - **派猫猫旅行**（上游 `0b0d667` 引入，本地零改动）：官网成长中心挂机玩法，wb-switch 做自动托管——启动即派发、30 分钟补派、15 分钟检查领奖；状态机 idle→traveling→arrived→claim；**咖啡馆 = 服务端下发的地点名之一**（非独立功能）。实测本机 4 账号：单账号每天 1 次、随机 5~9 积分、一趟约 1 小时，满勤 ≈20~36 积分/天（今日 27）。账本 `~/.wb-switch/travel_cache.json`（只存当天）。
 - 坑位补记：server **package 名是 `wb-switch-server`**（bin 才叫 `wb-switch`）；exe 编译报 os error 5 但查不到进程 → `mv` 成 `.prev.exe` 绕开再编。
 - 双门：cargo 195 绿 + tsc 0 错；dev 推至 `b946875`。
+
+## 2026-09-13 切号体验收口·续：预览与真实执行一致性（e4597d8 → 3530eab）
+
+- **起因**：主人要求盘点新增功能的优化空间，审出 2 个缺陷 + 3 个质量项，随后全部实施。
+  - **A 预览漏报主题**：真实执行无条件跑 `sync_theme_for_switch`，预览却只在勾选「设置同步」时提示 → 关掉该项时预览漏报。修法：**预览无条件给 `theme.planned`**（零行为变更，不动已验证逻辑）。
+  - **B 同秒 DB 备份互相覆盖**：`utc_iso()` 只到秒，`append_project_and_slim` 内项目同步与瘦身连续各备份一次 → 同秒同名目录覆盖，**pre-同步快照丢失**。修法：新增 `backup_stamp()`（秒级 + 毫秒）。
+  - **C 预览瘦身数偏大**：预览不真复制、拿不到复制体新 id，保护名单恒空，只有模糊文案。修法：`preview_sync` 增收 `copy_session_ids` → `session_cwds()` 查 cwd → `copy_hits()` 与 `slim.groups` 求交 → 输出 `slim.copyPlanned{total,hitCount,hitProjects}`，前端文案量化。
+  - **D 传参隐患**：`append_project_and_slim` 原同时收 `opts` 与独立 `dry_run`，两处调用都传原始 `opts` → 删掉独立参数，统一读 `opts.dry_run`。
+  - **E 重复代码**：抽 `run_switch_sync()`，预览与真实执行共用；五项短路抽 `AlignOptions::any_enabled()`。
+- **真机验证两轮**：
+  - 09:45 首轮：① 关闭「设置同步」后预览仍显示「界面主题：跟随目标账号」✔；② 量化文案**未出现** → 根因 `doPreview()` 请求体漏传 `copySessionIds`（`doSwitch()` 有传），`b3f5211` 修复（+2 行）。
+  - 09:53 二轮：未选会话 → 原文案；选中 1 条 → 「本次复制的 1 条会被跳过，其中 1 条落在上述 1 个瘦身项目」✔。**A–E 全部闭环**。
+- **自纠记录**：`backup_stamp()` 首版写成 `format!("{}-{}", ...)` 漏了 `Z` 后缀，被同批新增的单测 `backup_stamp_is_unique_per_millisecond` 当场抓到。
+- 新单测 3 个（`any_enabled` / `copy_hits` / `backup_stamp`）→ **198 绿**（原 195）；tsc 0 错。
+- **新坑位**：① 切号弹窗「预览」与「切换」是两条独立请求体，加字段必须两处同改；② 备份目录名必须毫秒级；③ 沙箱内 `git fetch` 假成功、refs 不落盘，判定推送状态只用 `git ls-remote`。
+- 产物：dist + GUI release（09:48）+ server release 均已重编；dev 推至 `3530eab`。
+- **附带决策**：用户级技能 `delivery-no-pseudoblock` 评估后**卸载**（主人定）——两轮实测 D1–D12 全空零拦截，与项目「读档后等放行」纪律冲突，且 D7/D8/D9 与本项目 cargo+tsc 双门重复。副本保留在 `~/.workbuddy/skills-disabled/`，移回即恢复。
