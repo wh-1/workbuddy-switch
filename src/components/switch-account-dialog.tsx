@@ -180,6 +180,8 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone }: Pro
     try {
       const res = await api.switchAccount({
         accountId: account.id,
+        // 预览不真复制，但要把「将要复制的会话」传进去，用于量化瘦身的抵消条数
+        copySessionIds: copySessions ? [...selected] : undefined,
         alignAutomations: alignAutomations,
         alignSessions: alignSessions,
         alignFiles: alignFiles,
