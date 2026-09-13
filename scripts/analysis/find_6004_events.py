@@ -4,8 +4,11 @@
 find_6004_events.py — WorkBuddy 频率限制(6004)事件扫描器
 
 数据源（只读）：~/.workbuddy/logs/<日期>/sdk/conversations/*.log
-- 每行 = 一次客户端事件，JSON 格式
-- `method:sendPrompt` 记录每次模型调用（含 modelId、时间戳）
+- 每行 = 一次客户端事件，格式：`<UTC时间戳> method:... {JSON 载荷}`
+  ⚠️ 时间戳在**行首文本**（`2026-09-06T14:47:20.929Z method:sendPrompt {...}`），
+     **不是 JSON 字段** —— 解析别按 `\"timestamp\"` 正则（已踩坑）。
+- `method:sendPrompt` 记录每次模型调用（modelId 在 JSON 载荷内；时间戳看行首）
+- 所有时间戳为 UTC，展示/计算统一 +8 转北京时间
 - `runtime.applyStopReason` 在触顶时带 `code:6004`、`statusCode:429`、
   `category:quota`、以及重置时间（如 "将在 2026-09-13 14:26:22 UTC+8 重置"）
 
@@ -42,7 +45,7 @@ WINDOW_ANCHOR = (14, 26, 22)
 
 
 def parse_ts(s: str):
-    # 2026-09-12T11:00:36.981Z
+    # 2026-09-12T11:00:36.981Z  —— 日志时间戳是 UTC
     try:
         return datetime.strptime(s, "%Y-%m-%dT%H:%M:%S.%fZ")
     except ValueError:
@@ -50,6 +53,11 @@ def parse_ts(s: str):
             return datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ")
         except ValueError:
             return None
+
+
+def to_bj(dt: datetime):
+    """UTC(naive) -> 北京时间(+8)。日志行首时间戳一律 UTC，展示与计算必须转北京。"""
+    return dt + timedelta(hours=8) if dt else dt
 
 
 def window_date(dt: datetime) -> str:
@@ -118,7 +126,7 @@ def scan(recent_days=None, model_filter=None):
                         mid = obj.get("modelId") if obj else None
                         ts = extract_ts(line)
                         if mid and ts:
-                            call_counter[mid][window_date(ts)] += 1
+                            call_counter[mid][window_date(to_bj(ts))] += 1
                             last_model[fname] = mid
                     except Exception:
                         pass
@@ -154,7 +162,7 @@ def scan(recent_days=None, model_filter=None):
                             tenant = tm.group(1)
                         events.append({
                             "date": file_date,
-                            "ts": ts.strftime("%Y-%m-%d %H:%M:%S") if ts else "?",
+                            "ts": to_bj(ts).strftime("%Y-%m-%d %H:%M:%S") if ts else "?",
                             "model": mid or msg_model or "(unknown)",
                             "reset": reset or "(未知)",
                             "code": cm.group(1) if cm else "?",
@@ -182,7 +190,7 @@ def main():
         print("✅ 未检测到 6004 频率限制事件。")
     else:
         print(f"⚠️ 共检测到 {len(events)} 次 6004 频率限制事件：\n")
-        print(f"{'日期':<12}{'触发时间':<22}{'模型':<22}{'重置时间(北京)':<22}")
+        print(f"{'日期':<12}{'触发时间(北京)':<22}{'模型':<22}{'重置时间(北京)':<22}")
         print("-" * 78)
         for e in events:
             if args.model and args.model.lower() not in e["model"].lower():
