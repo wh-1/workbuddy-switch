@@ -19,7 +19,7 @@ use crate::modules::auth_file;
 use crate::modules::config::{backup_dir, home_dir, now_ms, now_secs, utc_iso};
 
 /// 打开数据库并设置 busy_timeout（对照 Python `sqlite3.connect(timeout=5)`）。
-fn open_db(path: &Path, read_only: bool) -> Option<Connection> {
+pub(crate) fn open_db(path: &Path, read_only: bool) -> Option<Connection> {
     let conn = if read_only {
         Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?
     } else {
@@ -48,7 +48,7 @@ pub fn current_user_uid() -> Option<String> {
         .map(|s| s.to_string())
 }
 
-fn table_exists(conn: &Connection, name: &str) -> bool {
+pub(crate) fn table_exists(conn: &Connection, name: &str) -> bool {
     conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
         [name],
@@ -186,7 +186,7 @@ fn find_project_jsonl(cid: &str) -> Option<PathBuf> {
 }
 
 /// 备份 workbuddy.db（含 -wal/-shm），返回主库备份路径。对照 `backup_workbuddy_db`。
-fn backup_workbuddy_db(backup_root: &Path) -> Option<PathBuf> {
+pub(crate) fn backup_workbuddy_db(backup_root: &Path) -> Option<PathBuf> {
     let db = workbuddy_db_path();
     if !db.is_file() {
         return None;
@@ -391,11 +391,10 @@ mod tests {
 
     #[test]
     fn db_paths_point_to_home() {
-        assert!(workbuddy_db_path()
-            .to_string_lossy()
+        let norm = |p: &std::path::Path| p.to_string_lossy().replace('\\', "/");
+        assert!(norm(&workbuddy_db_path())
             .ends_with(".workbuddy/workbuddy.db"));
-        assert!(edge_sync_db_path()
-            .to_string_lossy()
+        assert!(norm(&edge_sync_db_path())
             .ends_with("edge-sync-mapping-v2.db"));
     }
 

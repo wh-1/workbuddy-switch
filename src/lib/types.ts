@@ -14,6 +14,22 @@ export interface AccountMeta {
   needsReloginReason: string | null;
 }
 
+/** 本机曾登录/留有数据的账号（discover 结果，只读视图）。 */
+export interface DiscoveredAccount {
+  uid: string;
+  nickname: string | null;
+  email: string | null;
+  /** auth-history = 官方登录历史备份（含凭据，可补录）；residual = 仅数据残留 */
+  source: "auth-history" | "residual";
+  backupFiles: number;
+  backedUpAt: number | null;
+  inAccountList: boolean;
+  accessTokenExpiresAt: number | null;
+  refreshTokenExpiresAt: number | null;
+  /** 有 auth 历史备份且 refresh token 未过期，可一键补录 */
+  restorable: boolean;
+}
+
 export interface AppStatus {
   running: boolean;
   authFile: string;
@@ -95,11 +111,63 @@ export interface SwitchResult {
   ok: boolean;
   account: string;
   backup: string | null;
+  dryRun?: boolean;
   sessionCopy?: {
     sourceUid: string;
     targetUid: string;
     copied: CopyResult[];
     errors?: { id: string; error: string }[];
+  };
+  automationAlign?: {
+    targetUid: string;
+    automationsUpdated: number;
+    outboxUpdated: number;
+    backup: string | null;
+  };
+  alignData?: AlignDataReport;
+}
+
+export interface AlignDataReport {
+  targetUid: string;
+  dryRun: boolean;
+  noop?: boolean;
+  error?: string;
+  backup?: { db: string | null; settings: string | null };
+  automations?: { updated: number; outbox: number };
+  sessions?: { updated: number; triggerRemoved: boolean; error?: string };
+  /** 「设置同步」：settings 深合并 / storage 补齐 / 画像 / my-files / 主题跟随。 */
+  settings?: {
+    sourceUid?: string | null;
+    claw?: { changed: number; keys?: string[]; skipped?: boolean; error?: string };
+    storage?: { copied: number; skipped: number; deferred: number; samples?: string[] };
+    memory?: { changed: boolean; bytes?: number; skipped?: boolean };
+    myFiles?: { files: number; changed: number; keys: number };
+    theme?: Record<string, unknown>;
+  };
+  /** 「同步项目侧栏」：补缺占位 + 多余软删。 */
+  projects?: {
+    addedCount?: number;
+    removedCount?: number;
+    added?: { cwd: string; sessionId?: string; planned?: boolean }[];
+    removedProjects?: { cwd: string; sessions: number; planned?: boolean }[];
+    error?: string;
+  };
+  /** 「会话瘦身」：每项目保留最近 N 条。 */
+  slim?: {
+    uid?: string;
+    keep?: number;
+    planned?: number;
+    deleted?: number;
+    /** 受保护的会话数（本次复制体，既不被删也不占名额）。 */
+    excluded?: number;
+    /** 每个项目将被删除的条数。 */
+    groups?: { cwd: string; count: number }[];
+    /**
+     * 仅预览：本次将复制的会话对瘦身的抵消。
+     * 预览不真复制，复制体拿不到新 id、进不了保护名单，`planned` 偏大，故给此量化提示。
+     */
+    copyPlanned?: { total: number; hitCount: number; hitProjects: number };
+    error?: string;
   };
 }
 
@@ -416,3 +484,37 @@ export interface CodeBuddyCnIdeSwitchResult {
   message?: string;
 }
 
+
+/** 单个「账号 × 模型」的限额状态（解锁时刻来自服务端 429 原文，权威） */
+export interface ModelLimitState {
+  account: string | null;
+  /** 账号 uid 前 8 位——按它匹配账号卡片（昵称可改，uid 稳定） */
+  accountUid: string | null;
+  model: string;
+  /** 解锁时刻（北京时间字符串，展示用） */
+  unlock: string;
+  /** 解锁时刻毫秒时间戳（前端倒计时用） */
+  unlockEpochMs: number;
+  limited: boolean;
+  remainingSecs: number;
+}
+
+export interface ModelLimitEvent {
+  ts: string;
+  source: string;
+  session: string | null;
+  account: string | null;
+  accountUid: string | null;
+  model: string | null;
+  unlock: string;
+  confidence: string;
+}
+
+export interface ModelLimitSnapshot {
+  generatedAt?: string;
+  limitedCount?: number;
+  states?: ModelLimitState[];
+  events?: ModelLimitEvent[];
+  note?: string;
+  error?: string;
+}

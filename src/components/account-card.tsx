@@ -1,7 +1,8 @@
 import { ArrowRight, Check, CircleCheck, Clock3, Coins, Ellipsis, Loader2, PlaneTakeoff, RefreshCw, Sparkles, Star, Trash2 } from "lucide-react";
-import { useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
+import type { ModelLimitState } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { DemoAction } from "@/components/demo-action";
 import {
@@ -157,6 +158,58 @@ function travelChip(status: TravelStatus | undefined) {
   }
 }
 
+/** 剩余时长文案：统一相对时长（不按跨天切绝对时刻——同列混格式反而难扫视）。 */
+function formatLimitRemaining(secs: number): string {
+  const total = Math.max(0, Math.ceil(secs / 60));
+  const days = Math.floor(total / 1440);
+  const hours = Math.floor((total % 1440) / 60);
+  const minutes = total % 60;
+  if (days > 0) return `${days}天${hours}小时`;
+  if (hours > 0) return `${hours}小时${minutes}分`;
+  return `${minutes}分`;
+}
+
+/** 限额 chip：紧凑模式只出图标（文字太长会撑爆头部），明细一律放悬停。 */
+function limitChip(limited: ModelLimitState[], nowMs: number, compact: boolean) {
+  if (limited.length === 0) return null;
+  const remaining = formatLimitRemaining((limited[0].unlockEpochMs - nowMs) / 1000);
+  const remainingOf = (item: ModelLimitState) => formatLimitRemaining((item.unlockEpochMs - nowMs) / 1000);
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Badge
+          variant="destructive"
+          className={cn(chipClass, "px-1", !compact && "gap-1.5")}
+          aria-label={compact ? `${limited.length} 个模型受限` : undefined}
+        >
+          <Clock3 className="size-3.5" />
+          {!compact && (limited.length === 1 ? `${limited[0].model} 还剩 ${remaining}` : `限 ${limited.length} 个模型 · 最早 ${remaining}`)}
+        </Badge>
+      </TooltipTrigger>
+      <TooltipContent side="top" className="grid grid-cols-[auto_auto_auto] items-baseline gap-x-3 gap-y-1">
+        {limited.map((item) => (
+          <Fragment key={`${item.accountUid ?? ""}-${item.model}`}>
+            <span className="whitespace-nowrap font-medium">{item.model}</span>
+            <span className="whitespace-nowrap tabular-nums">还剩 {remainingOf(item)}</span>
+            <span className="whitespace-nowrap tabular-nums text-muted-foreground">{item.unlock.slice(5, 16)} 解锁</span>
+          </Fragment>
+        ))}
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
+/** 每分钟重算剩余时长；无受限时不挂定时器。 */
+function useMinuteTick(enabled: boolean): number {
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    if (!enabled) return;
+    const id = window.setInterval(() => setNowMs(Date.now()), 30_000);
+    return () => window.clearInterval(id);
+  }, [enabled]);
+  return nowMs;
+}
+
 interface Props {
   account: AccountMeta;
   onDelete: (a: AccountMeta) => void;
@@ -167,6 +220,8 @@ interface Props {
   /** 今日旅行状态（undefined=查询中/未知，不渲染标签） */
   travelStatus?: TravelStatus;
   credit?: CreditExpiry;
+  /** 该账号的「模型 × 解锁时刻」限额状态（只在受限时渲染 chip） */
+  limits?: ModelLimitState[];
   creditLoading?: boolean;
   /** 该账号积分最近一次查询完成时间（时间戳） */
   creditUpdatedAt?: number;
@@ -219,7 +274,7 @@ function ProductCurrentState({ product, compact = false }: { product: "workbuddy
   );
 }
 
-export function AccountCard({ account, onDelete, onCheckin, onRefresh, onSwitch, todayCheckedIn, travelStatus, credit, creditLoading, creditUpdatedAt, creditPriority, workbuddyActive, codebuddyCliConfigured, codebuddyCliActive, codebuddyCliBusy, onSwitchCodebuddyCli, codebuddyCliLoading, codebuddyCnIdeAvailable, codebuddyCnIdeActive, codebuddyCnIdeBusy, codebuddyCnIdeLoading, onSwitchCodebuddyCnIde, featuresDisabled = true, compact = false }: Props) {
+export function AccountCard({ account, onDelete, onCheckin, onRefresh, onSwitch, todayCheckedIn, travelStatus, credit, limits, creditLoading, creditUpdatedAt, creditPriority, workbuddyActive, codebuddyCliConfigured, codebuddyCliActive, codebuddyCliBusy, onSwitchCodebuddyCli, codebuddyCliLoading, codebuddyCnIdeAvailable, codebuddyCnIdeActive, codebuddyCnIdeBusy, codebuddyCnIdeLoading, onSwitchCodebuddyCnIde, featuresDisabled = true, compact = false }: Props) {
   const [resourcesOpen, setResourcesOpen] = useState(false);
   const name = account.nickname || account.uid || "未命名账号";
   const expired = typeof account.expiresAt === "number" && account.expiresAt < Date.now();
@@ -227,6 +282,9 @@ export function AccountCard({ account, onDelete, onCheckin, onRefresh, onSwitch,
   const resources = creditResources(credit);
   const visibleResources = resources.slice(0, 2);
   const expiringAmount = credit?.ok ? credit.expiringSoonRemaining ?? 0 : 0;
+  // 限额：只渲染"仍未解锁"的；到点自动消失，不留旧值
+  const nowMs = useMinuteTick((limits?.length ?? 0) > 0);
+  const limitedLimits = (limits ?? []).filter((item) => item.unlockEpochMs > nowMs);
   /** 弹窗内展示还有剩余的资源包（已用完的隐藏），按到期时间升序 */
   const allResources = (credit?.resources ?? [])
     .filter((resource) => resource.remaining > 0)
@@ -242,6 +300,7 @@ export function AccountCard({ account, onDelete, onCheckin, onRefresh, onSwitch,
 
   const statusChips = (
     <>
+      {limitChip(limitedLimits, nowMs, compact)}
       {todayCheckedIn !== undefined && (
         <Badge variant={todayCheckedIn ? "success" : "secondary"} className={cn(chipClass, !todayCheckedIn && "text-muted-foreground")}><CircleCheck /> {todayCheckedIn ? "已签到" : "未签到"}</Badge>
       )}

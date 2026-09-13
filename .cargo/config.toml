@@ -1,0 +1,5 @@
+# wb-switch 本地 Cargo 配置（不进 PR，纯本机优化）
+# 关闭增量编译：避免 target/debug/incremental 反复膨胀（曾涨到 6.9GB），
+# 代价是每次改动后 debug 编译稍慢，但稳定性与磁盘可控性更优。
+[build]
+incremental = false

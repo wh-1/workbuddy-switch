@@ -16,6 +16,7 @@ import {
 } from "@/components/ui/dialog";
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
+import { AlignOptionsPanel, formatAlignReport } from "@/components/align-options";
 import * as api from "@/lib/api";
 import type { AccountMeta, Session } from "@/lib/types";
 
@@ -33,6 +34,13 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone }: Pro
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loadingSessions, setLoadingSessions] = useState(false);
   const [copySessions, setCopySessions] = useState(false);
+  const [alignAutomations, setAlignAutomations] = useState(true);
+  const [alignSessions, setAlignSessions] = useState(false);
+  const [alignFiles, setAlignFiles] = useState(true);
+  const [syncProjects, setSyncProjects] = useState(true);
+  const [slimSessions, setSlimSessions] = useState(true);
+  const [previewLines, setPreviewLines] = useState<string[] | null>(null);
+  const [previewing, setPreviewing] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   /** 展开的节点：任务 / 空间 / 文件夹。默认全部收起。 */
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -66,6 +74,10 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone }: Pro
   useEffect(() => {
     if (open && account) {
       setCopySessions(false);
+      setAlignAutomations(true);
+      setAlignSessions(false);
+      setAlignFiles(true);
+      setPreviewLines(null);
       setSelected(new Set());
       setExpanded(new Set());
       setError("");
@@ -118,11 +130,34 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone }: Pro
       const res = await api.switchAccount({
         accountId: account.id,
         copySessionIds: copySessions ? [...selected] : undefined,
+        alignAutomations: alignAutomations,
+        alignSessions: alignSessions,
+        alignFiles: alignFiles,
+        syncProjects: syncProjects,
+        slimKeep: slimSessions ? 1 : 0,
       });
       const nickname = account.nickname || account.email || account.uid || "该账号";
       const parts: string[] = [];
       if (res.sessionCopy?.copied.length) {
         parts.push(`已复制 ${res.sessionCopy.copied.length} 个会话`);
+      }
+      if (res.alignData?.automations) {
+        parts.push(`已对齐 ${res.alignData.automations.updated} 个自动化`);
+      }
+      if (res.alignData?.sessions?.updated) {
+        parts.push(`已对齐 ${res.alignData.sessions.updated} 个会话`);
+      }
+      if (res.alignData?.settings?.storage?.copied) {
+        parts.push(`已同步 ${res.alignData.settings.storage.copied} 个文件`);
+      }
+      if (res.alignData?.projects?.addedCount) {
+        parts.push(`已补 ${res.alignData.projects.addedCount} 个项目占位`);
+      }
+      if (res.alignData?.projects?.removedCount) {
+        parts.push(`已清理 ${res.alignData.projects.removedCount} 条多余对话`);
+      }
+      if (res.alignData?.slim?.deleted) {
+        parts.push(`会话瘦身：已删 ${res.alignData.slim.deleted} 条`);
       }
       if (res.backup) parts.push(`备份: ${res.backup}`);
       toast.success(`已切换至「${nickname}」`, {
@@ -135,6 +170,30 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone }: Pro
     } finally {
       setBusy(false);
       setProgress("");
+    }
+  }
+
+  async function doPreview() {
+    if (!account) return;
+    setPreviewing(true);
+    setError("");
+    try {
+      const res = await api.switchAccount({
+        accountId: account.id,
+        // 预览不真复制，但要把「将要复制的会话」传进去，用于量化瘦身的抵消条数
+        copySessionIds: copySessions ? [...selected] : undefined,
+        alignAutomations: alignAutomations,
+        alignSessions: alignSessions,
+        alignFiles: alignFiles,
+        syncProjects: syncProjects,
+        slimKeep: slimSessions ? 1 : 0,
+        dryRun: true,
+      });
+      setPreviewLines(res.alignData ? formatAlignReport(res.alignData) : ["无对齐数据"]);
+    } catch (e) {
+      setPreviewLines([api.asError(e)]);
+    } finally {
+      setPreviewing(false);
     }
   }
 
@@ -243,6 +302,18 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone }: Pro
               disabled={loadingSessions || sessions.length === 0}
             />
           </div>
+
+          <AlignOptionsPanel
+            value={{ alignAutomations, alignSessions, alignFiles, syncProjects, slimSessions }}
+            onChange={(next) => {
+              setAlignAutomations(next.alignAutomations);
+              setAlignSessions(next.alignSessions);
+              setAlignFiles(next.alignFiles);
+              setSyncProjects(next.syncProjects);
+              setSlimSessions(next.slimSessions);
+            }}
+            previewLines={previewLines}
+          />
 
           {copySessions && (
             <>
@@ -395,6 +466,13 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone }: Pro
         <DialogFooter className="shrink-0">
           <Button variant="outline" onClick={() => onOpenChange(false)} disabled={busy}>
             取消
+          </Button>
+          <Button
+            variant="secondary"
+            onClick={doPreview}
+            disabled={busy || previewing || (!alignAutomations && !alignSessions && !alignFiles && !syncProjects && !slimSessions)}
+          >
+            {previewing ? "统计中…" : "预览对齐"}
           </Button>
           <Button onClick={doSwitch} disabled={busy || (copySessions && copyCount === 0)}>
             {busy ? "切换中…" : "确认切换"}

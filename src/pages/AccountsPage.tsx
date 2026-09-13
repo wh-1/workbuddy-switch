@@ -14,6 +14,7 @@ import {
 
 import { AccountCard } from "@/components/account-card";
 import { DemoAction } from "@/components/demo-action";
+import { DiscoverAccountsBanner } from "@/components/discover-accounts-banner";
 import { CodeBuddyCnIdeMark, CodeBuddyMark, WorkBuddyMark } from "@/components/product-marks";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -34,7 +35,7 @@ import { ImportAccountsDialog } from "@/components/import-accounts-dialog";
 import { OAuthLoginDialog } from "@/components/oauth-login-dialog";
 import { SwitchAccountDialog } from "@/components/switch-account-dialog";
 import * as api from "@/lib/api";
-import type { AccountMeta, AppStatus, CheckinConfig, CodeBuddyCliStatus, CodeBuddyCnIdeStatus, CreditExpiry, TravelConfig, TravelStatus } from "@/lib/types";
+import type { AccountMeta, AppStatus, CheckinConfig, CodeBuddyCliStatus, CodeBuddyCnIdeStatus, CreditExpiry, ModelLimitState, TravelConfig, TravelStatus } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { useAccountsStore } from "@/stores/accounts";
 
@@ -133,6 +134,27 @@ export default function AccountsPage() {
     ensureCredits,
     refreshCredits,
   } = useAccountsStore();
+  // 模型限额：扫本机日志还原「账号 × 模型 × 官方解锁时刻」，按 uid 前 8 位归到卡片
+  const [limitStates, setLimitStates] = useState<ModelLimitState[]>([]);
+  useEffect(() => {
+    let alive = true;
+    api
+      .getModelLimits()
+      .then((snapshot) => {
+        if (alive) setLimitStates(snapshot.states ?? []);
+      })
+      .catch(() => {
+        /* 演示模式 / 读取失败：不打扰用户 */
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+  const limitsByUid: Record<string, ModelLimitState[]> = {};
+  for (const state of limitStates) {
+    if (!state.accountUid) continue;
+    (limitsByUid[state.accountUid] ??= []).push(state);
+  }
   const [oauthOpen, setOauthOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
@@ -676,6 +698,8 @@ export default function AccountsPage() {
         </Alert>
       )}
 
+      <DiscoverAccountsBanner onAdopted={() => void fetchAll()} />
+
       {codebuddyCli &&
         (!codebuddyCli.configured ||
           (!codebuddyUsesSettingsEnv && !codebuddyCli.helperSupportsAccountIds) ||
@@ -821,6 +845,7 @@ export default function AccountsPage() {
                 todayCheckedIn={checkinMap[a.id]}
                 travelStatus={travelMap[a.id]}
                 credit={creditMap[a.id]}
+                limits={limitsByUid[a.uid?.slice(0, 8) ?? ""]}
                 creditLoading={creditLoadingMap[a.id]}
                 creditUpdatedAt={creditUpdatedAtMap[a.id]}
                 creditPriority={a.id === priorityAccountId}

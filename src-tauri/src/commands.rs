@@ -257,31 +257,45 @@ pub fn reveal_app_in_finder() -> Result<(), String> {
 ///
 /// async + spawn_blocking：切换中关闭/启动 WorkBuddy 会阻塞数十秒，
 /// 若在同步 command（主线程）执行会卡死整个 UI（loading 遮罩无法渲染）。
+///
+/// 参数走扁平 camelCase（与 align_data 及 HTTP api 一致）：
+/// 前端 invoke 传的是扁平字段，若改用嵌套 `Option<SwitchOptions>`，
+/// 前端字段对不上参数名会静默落回 Default（勾选全部失效）。
 #[tauri::command(rename_all = "camelCase")]
 pub async fn switch_account(
     app: tauri::AppHandle,
     account_id: String,
-    restart: Option<bool>,
+    _restart: Option<bool>,
     share_sessions: Option<bool>,
     copy_session_ids: Option<Vec<String>>,
+    align_automations: Option<bool>,
+    align_sessions: Option<bool>,
+    align_files: Option<bool>,
+    sync_projects: Option<bool>,
+    slim_keep: Option<i64>,
+    dry_run: Option<bool>,
 ) -> Result<Value, String> {
     if account_id.trim().is_empty() {
         return Err("缺少 accountId".to_string());
     }
-    let restart = restart.unwrap_or(true);
-    let share_sessions = share_sessions.unwrap_or(false);
-    let copy_ids = copy_session_ids.unwrap_or_default();
+    // 桌面端切换必定重启（原实现同样强制），其余选项尊重前端勾选，
+    // 缺省值与 SwitchOptions::default 保持一致。
+    let opts = switch::SwitchOptions {
+        restart: true,
+        share_sessions: share_sessions.unwrap_or(false),
+        copy_session_ids: copy_session_ids.unwrap_or_default(),
+        align_automations: align_automations.unwrap_or(true),
+        align_sessions: align_sessions.unwrap_or(false),
+        align_files: align_files.unwrap_or(false),
+        sync_projects: sync_projects.unwrap_or(false),
+        slim_keep: slim_keep.unwrap_or(0),
+        dry_run: dry_run.unwrap_or(false),
+    };
     let progress: switch::ProgressFn = Box::new(move |message| {
         let _ = app.emit("switch-progress", json!({ "message": message }));
     });
     tauri::async_runtime::spawn_blocking(move || {
-        switch::switch_account(
-            Some(&progress),
-            &account_id,
-            restart,
-            share_sessions,
-            &copy_ids,
-        )
+        switch::switch_account(Some(&progress), &account_id, &opts)
     })
     .await
     .map_err(|e| e.to_string())?

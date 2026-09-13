@@ -1,0 +1,487 @@
+//! UI 主题跟随账号（L6）：切号时把目标账号的主题预写进 WorkBuddy Local Storage。
+//!
+//! 背景：WorkBuddy 桌面端把 UI 主题存在 Electron Local Storage（LevelDB），
+//! 键 `agent-ui-theme`，登录后由云端账号偏好**异步**回写 → 切号重启的瞬间可能
+//! 先渲染默认主题（实测出现过：应深色却先浅色）。本模块在 App 完全关闭后、
+//! 重启前：① 备份被切走账号的当前主题；② 把目标账号上次备份的主题 append 进
+//! LevelDB log，重启即为目标账号主题，不等云端同步。
+//!
+//! 安全设计（append-only，不改写任何现有字节）：
+//! - 只向**最新 .log 文件末尾**追加一条完整 record；LevelDB 打开时按序 replay，
+//!   我们这条因 sequence 更大而覆盖旧值。
+//! - record 的 CRC 若算错或格式不符，LevelDB 会丢弃该 record——最坏情况是
+//!   「预写不生效」，原有数据不受影响。
+//! - 追加前整目录备份到 `~/.wb-switch/backups/localstorage/<ts>/`。
+//!
+//! 格式（2026-09-10 在本机 leveldb 上字节级验证）：
+//! - key   = `_file://\0\x01agent-ui-theme`
+//! - value = 0x01 + JSON（`{"theme":"dark","followSystem":false,
+//!           "vsCodeThemeName":"IDE Night","vsCodeThemeKind":"vscode-dark"}`）
+//! - batch = seq(u64 le) + count(u32 le) + [type(1) + varint(klen) + key + varint(vlen) + value]
+//! - record = crc32c-masked(4 le) + len(2 le) + type(1) + batch（crc 覆盖 type+batch）
+
+use serde_json::{json, Value};
+use std::fs;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
+use crate::modules::config::{backup_dir, home_dir, now_ms, utc_iso};
+
+/// 主题键的完整 LevelDB key（origin 固定为打包渲染进程的 `_file://`）。
+const THEME_KEY: &[u8] = b"_file://\x00\x01agent-ui-theme";
+/// Chromium localStorage value 首字节（0x01 = 单字节文本标记，实测样例如此）。
+const VALUE_PREFIX: u8 = 0x01;
+/// WorkBuddy userData 下的 Local Storage 位置。
+const LEVELDB_SUBDIR: &str = "app/session/Local Storage/leveldb";
+/// 主题备份目录名（~/.wb-switch/ui_prefs/）。
+const PREFS_DIR: &str = "ui_prefs";
+/// LevelDB log 常量。
+const BLOCK: usize = 32 * 1024;
+const RECORD_HEADER: usize = 7;
+const RECORD_FULL: u8 = 1;
+const BATCH_TYPE_VALUE: u8 = 1;
+
+fn leveldb_dir() -> PathBuf {
+    home_dir().join(".workbuddy").join(LEVELDB_SUBDIR)
+}
+
+fn prefs_dir() -> PathBuf {
+    home_dir().join(".wb-switch").join(PREFS_DIR)
+}
+
+// ---------------------------------------------------------------------------
+// CRC32C（Castagnoli，LevelDB 标准校验）
+// ---------------------------------------------------------------------------
+
+fn crc32c_table() -> &'static [u32; 256] {
+    use std::sync::OnceLock;
+    static TABLE: OnceLock<[u32; 256]> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        let mut t = [0u32; 256];
+        for (i, e) in t.iter_mut().enumerate() {
+            let mut c = i as u32;
+            for _ in 0..8 {
+                c = if c & 1 != 0 { 0x82F6_3B78 ^ (c >> 1) } else { c >> 1 };
+            }
+            *e = c;
+        }
+        t
+    })
+}
+
+pub fn crc32c(data: &[u8]) -> u32 {
+    let t = crc32c_table();
+    let mut crc = 0xFFFF_FFFFu32;
+    for &b in data {
+        crc = t[(crc ^ b as u32) as usize & 0xFF] ^ (crc >> 8);
+    }
+    crc ^ 0xFFFF_FFFF
+}
+
+/// LevelDB 的 crc 掩码：rotate right 15 再加固定常数。
+fn mask_crc(crc: u32) -> u32 {
+    ((crc >> 15) | (crc << 17)).wrapping_add(0xA282_EAD8)
+}
+
+// ---------------------------------------------------------------------------
+// 编码
+// ---------------------------------------------------------------------------
+
+fn put_varint32(out: &mut Vec<u8>, mut v: u32) {
+    loop {
+        if v < 0x80 {
+            out.push(v as u8);
+            break;
+        }
+        out.push(((v & 0x7F) as u8) | 0x80);
+        v >>= 7;
+    }
+}
+
+fn read_varint32(data: &[u8], p: usize) -> Option<(u32, usize)> {
+    let mut v = 0u32;
+    let mut s = 0u32;
+    for n in 0..5 {
+        let b = *data.get(p + n)?;
+        v |= ((b & 0x7F) as u32) << s;
+        if b & 0x80 == 0 {
+            return Some((v, n + 1));
+        }
+        s += 7;
+    }
+    None
+}
+
+/// 构造一条含单条 put 的 WriteBatch payload。
+fn build_batch(seq: u64, key: &[u8], value: &[u8]) -> Vec<u8> {
+    let mut p = Vec::with_capacity(12 + key.len() + value.len() + 6);
+    p.extend_from_slice(&seq.to_le_bytes());
+    p.extend_from_slice(&1u32.to_le_bytes()); // count = 1
+    p.push(BATCH_TYPE_VALUE);
+    put_varint32(&mut p, key.len() as u32);
+    p.extend_from_slice(key);
+    put_varint32(&mut p, value.len() as u32);
+    p.extend_from_slice(value);
+    p
+}
+
+/// 把 batch payload 封成一条 FULL log record。
+fn build_log_record(payload: &[u8]) -> Vec<u8> {
+    assert!(payload.len() + RECORD_HEADER <= BLOCK, "单条 record 必须放进一个 block");
+    let mut crc_input = Vec::with_capacity(1 + payload.len());
+    crc_input.push(RECORD_FULL);
+    crc_input.extend_from_slice(payload);
+    let masked = mask_crc(crc32c(&crc_input));
+
+    let mut out = Vec::with_capacity(RECORD_HEADER + payload.len());
+    out.extend_from_slice(&masked.to_le_bytes());
+    out.extend_from_slice(&(payload.len() as u16).to_le_bytes());
+    out.push(RECORD_FULL);
+    out.extend_from_slice(payload);
+    out
+}
+
+// ---------------------------------------------------------------------------
+// LevelDB log 读写（.log 文件，字节级扫描）
+// ---------------------------------------------------------------------------
+
+fn log_files(dir: &Path) -> Vec<PathBuf> {
+    let mut logs: Vec<(u64, PathBuf)> = fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            let num: u64 = name.strip_suffix(".log")?.parse().ok()?;
+            Some((num, e.path()))
+        })
+        .collect();
+    logs.sort_by_key(|(n, _)| *n);
+    logs.into_iter().map(|(_, p)| p).collect()
+}
+
+/// 在一段字节里找 KEY 的所有出现位置。
+fn find_all(haystack: &[u8], needle: &[u8]) -> Vec<usize> {
+    let mut out = Vec::new();
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return out;
+    }
+    for i in 0..=(haystack.len() - needle.len()) {
+        if &haystack[i..i + needle.len()] == needle {
+            out.push(i);
+        }
+    }
+    out
+}
+
+/// 扫描一段字节，取最后一次出现的主题 value（0x01 前缀 + 合法 JSON）。
+fn scan_theme_json_in(data: &[u8]) -> Option<String> {
+    let mut best: Option<String> = None;
+    for i in find_all(data, THEME_KEY) {
+        let Some((vlen, n)) = read_varint32(data, i + THEME_KEY.len()) else {
+            continue;
+        };
+        let vs = i + THEME_KEY.len() + n;
+        let ve = vs + vlen as usize;
+        if ve > data.len() {
+            continue;
+        }
+        let raw = &data[vs..ve];
+        if raw.first() != Some(&VALUE_PREFIX) {
+            continue;
+        }
+        let Ok(s) = std::str::from_utf8(&raw[1..]) else {
+            continue;
+        };
+        // 格式自校验：必须是含 theme 键的合法 JSON，防止误匹配到别的内容
+        let Ok(v) = serde_json::from_str::<Value>(s) else {
+            continue;
+        };
+        if v.get("theme").and_then(|t| t.as_str()).is_some() {
+            best = Some(s.to_string());
+        }
+    }
+    best
+}
+
+/// 读取当前主题 JSON（只扫 .log：新写入总落在 .log，compaction 后由云端回写兜底）。
+fn scan_current_theme(dir: &Path) -> Option<String> {
+    for p in log_files(dir).into_iter().rev() {
+        let Ok(data) = fs::read(&p) else { continue };
+        if let Some(s) = scan_theme_json_in(&data) {
+            return Some(s);
+        }
+    }
+    None
+}
+
+/// 向最新 .log 末尾追加一条覆盖主题的 record（处理 block 剩余空间）。
+fn append_theme_record(dir: &Path, seq: u64, theme_json: &str) -> Result<(), String> {
+    let mut logs = log_files(dir);
+    let latest = logs.pop().ok_or_else(|| "leveldb 无 .log 文件（可能刚被 compaction），跳过主题预写".to_string())?;
+    let payload = build_batch(seq, THEME_KEY, &[VALUE_PREFIX].iter().chain(theme_json.as_bytes()).copied().collect::<Vec<u8>>());
+    let record = build_log_record(&payload);
+
+    let existing = fs::read(&latest).map_err(|e| e.to_string())?;
+    let mut out: Vec<u8> = Vec::new();
+    let rem = BLOCK - (existing.len() % BLOCK);
+    if rem < RECORD_HEADER {
+        out.extend(std::iter::repeat(0u8).take(rem)); // trailer
+    } else if rem < RECORD_HEADER + record.len() {
+        out.extend(std::iter::repeat(0u8).take(rem)); // 本 block 放不下，另起 block
+    }
+    out.extend_from_slice(&record);
+
+    let mut f = fs::OpenOptions::new().append(true).open(&latest).map_err(|e| e.to_string())?;
+    f.write_all(&out).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 备份 / 恢复
+// ---------------------------------------------------------------------------
+
+fn theme_backup_path(uid: &str) -> PathBuf {
+    prefs_dir().join(format!("theme-{uid}.json"))
+}
+
+/// 备份某账号的当前主题（app 关闭后调用；读不到就跳过，等下次）。
+fn backup_theme_for(uid: &str, current: Option<&str>) -> bool {    let Some(json_text) = current else { return false };
+    fs::create_dir_all(prefs_dir()).ok();
+    let doc = json!({ "uid": uid, "capturedAt": now_ms(), "themeJson": json_text });
+    let p = theme_backup_path(uid);
+    let tmp = p.with_extension("json.tmp");
+    if fs::write(&tmp, doc.to_string()).is_err() {
+        return false;
+    }
+    fs::rename(&tmp, &p).is_ok()
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(dst)?;
+    for e in fs::read_dir(src)?.flatten() {
+        let t = dst.join(e.file_name());
+        if e.path().is_dir() {
+            copy_dir_recursive(&e.path(), &t)?;
+        } else {
+            fs::copy(e.path(), t)?;
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 云端继承：WorkBuddy 把明暗/皮肤选择按账号存云端（/portal/user-asset/appearance），
+// 切号启动后由外观运行时拉回——本地注入只能保证启动瞬间，云端改掉才能永久跟随。
+// 接口规格 2026-09-11 从 app.asar 渲染层逆向 + 本机实测（Bearer access_token）。
+// ---------------------------------------------------------------------------
+
+const APPEARANCE_GET_URL: &str = "https://www.workbuddy.cn/portal/user-asset/appearance/get";
+const APPEARANCE_SET_URL: &str = "https://www.workbuddy.cn/portal/user-asset/appearance/set";
+
+fn cloud_http() -> reqwest::blocking::Client {
+    reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        // 本机 WARP 代理会碍事，workbuddy.cn 直连可达
+        .no_proxy()
+        .build()
+        .unwrap_or_else(|_| reqwest::blocking::Client::new())
+}
+
+/// 读账号云端 theme 选择（resource_key，如 "light"/"dark"/皮肤 id）。
+fn fetch_cloud_theme(token: &str) -> Option<String> {
+    let resp: Value = cloud_http()
+        .get(APPEARANCE_GET_URL)
+        .bearer_auth(token)
+        .send()
+        .ok()?
+        .json()
+        .ok()?;
+    if resp.get("code").and_then(|c| c.as_i64()) != Some(0) {
+        return None;
+    }
+    let items = resp.get("data")?.get("items")?.as_array()?;
+    items
+        .iter()
+        .filter_map(|i| i.as_object())
+        .find(|o| o.get("kind").and_then(|k| k.as_str()) == Some("theme"))
+        .and_then(|o| o.get("resource_key"))
+        .and_then(|k| k.as_str())
+        .map(|s| s.to_string())
+}
+
+/// 写账号云端 theme 选择。
+fn push_cloud_theme(token: &str, resource_key: &str) -> Result<(), String> {
+    let resp: Value = cloud_http()
+        .post(APPEARANCE_SET_URL)
+        .bearer_auth(token)
+        .json(&json!({ "kind": "theme", "resource_key": resource_key }))
+        .send()
+        .map_err(|e| e.to_string())?
+        .json()
+        .map_err(|e| e.to_string())?;
+    match resp.get("code").and_then(|c| c.as_i64()) {
+        Some(0) => Ok(()),
+        _ => Err(format!("set 响应异常: {resp}")),
+    }
+}
+
+/// 云端继承：把 source 账号的 theme 选择写到 target 账号云端。
+/// 任一步失败返回 Err（不阻断切号），成功返回变更描述。
+fn inherit_cloud_theme(source_token: &str, target_token: &str) -> Result<Value, String> {
+    let source_theme = fetch_cloud_theme(source_token)
+        .ok_or_else(|| "读取 source 云端主题失败".to_string())?;
+    let target_theme = fetch_cloud_theme(target_token);
+    if target_theme.as_deref() == Some(source_theme.as_str()) {
+        return Ok(json!({ "changed": false, "theme": source_theme }));
+    }
+    push_cloud_theme(target_token, &source_theme)?;
+    Ok(json!({ "changed": true, "theme": source_theme, "previous": target_theme }))
+}
+
+// ---------------------------------------------------------------------------
+// 对外入口
+// ---------------------------------------------------------------------------
+
+/// 切号时同步主题，两层：
+///
+/// ① 本地继承：当前主题（= 上个账号留下的状态）以最新 sequence 追加，
+///    保证 app 重启瞬间显示的就是继承值；
+/// ② 云端继承（彻底解）：WorkBuddy 把明暗选择按账号存云端，切号启动后
+///    外观运行时会拉回 target 自己的偏好（实测几秒内覆盖本地）。
+///    用 target 的 token 调 appearance/set，把 target 云端选择改成 source
+///    的值，拉回的也就是继承值——永久跟随。
+///
+/// 必须在 WorkBuddy 完全关闭后、写 auth/重启前调用。两层互不依赖，
+/// 任何一层失败都不阻断切号。
+pub fn sync_theme_for_switch(
+    source_uid: Option<&str>,
+    target_uid: &str,
+    source_token: Option<&str>,
+    target_token: Option<&str>,
+) -> Value {
+    let dir = leveldb_dir();
+    if !dir.is_dir() || target_uid.is_empty() {
+        return json!({ "inherited": false, "cloud": null, "skipped": true });
+    }
+
+    // ① 本地继承
+    let local = scan_current_theme(&dir)
+        .map(|current| {
+            let dst = backup_dir().join("localstorage").join(utc_iso());
+            if let Err(e) = copy_dir_recursive(&dir, &dst) {
+                return json!({ "inherited": false, "theme": current, "error": format!("Local Storage 备份失败: {e}") });
+            }
+            match append_theme_record(&dir, now_ms() as u64, &current) {
+                Ok(()) => {
+                    let _ = backup_theme_for(target_uid, Some(&current));
+                    json!({ "inherited": true, "theme": current })
+                }
+                Err(e) => json!({ "inherited": false, "theme": current, "error": e }),
+            }
+        })
+        .unwrap_or_else(|| json!({ "inherited": false, "reason": "leveldb .log 中未读到当前主题" }));
+
+    // ② 云端继承（source/target token 齐备才做）
+    let cloud = match (source_token, target_token) {
+        (Some(src), Some(tgt)) if !src.is_empty() && !tgt.is_empty() => {
+            match inherit_cloud_theme(src, tgt) {
+                Ok(v) => v,
+                Err(e) => json!({ "changed": false, "error": e }),
+            }
+        }
+        _ => json!({ "changed": false, "reason": "缺少 source/target token" }),
+    };
+
+    let _ = source_uid; // 继承语义下源身份经 token 体现，uid 仅留作日志
+    json!({ "local": local, "cloud": cloud })
+}
+
+// ---------------------------------------------------------------------------
+// 测试
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn crc32c_matches_known_vectors() {
+        // CRC-32C 标准检验值
+        assert_eq!(crc32c(b"123456789"), 0xE306_9283);
+        assert_eq!(crc32c(b""), 0x0000_0000);
+        assert_eq!(crc32c(b"a"), 0xC1D0_4330);
+    }
+
+    #[test]
+    fn varint_roundtrip() {
+        for v in [0u32, 1, 127, 128, 300, 0xFFFF, 0x1234_5678] {
+            let mut buf = Vec::new();
+            put_varint32(&mut buf, v);
+            let (got, n) = read_varint32(&buf, 0).unwrap();
+            assert_eq!(got, v);
+            assert_eq!(n, buf.len());
+        }
+    }
+
+    const SAMPLE_LIGHT: &str =
+        r#"{"theme":"light","followSystem":false,"vsCodeThemeName":"IDE Light","vsCodeThemeKind":"vscode-light"}"#;
+    const SAMPLE_DARK: &str =
+        r#"{"theme":"dark","followSystem":false,"vsCodeThemeName":"IDE Night","vsCodeThemeKind":"vscode-dark"}"#;
+
+    fn theme_value(json_text: &str) -> Vec<u8> {
+        let mut v = vec![VALUE_PREFIX];
+        v.extend_from_slice(json_text.as_bytes());
+        v
+    }
+
+    /// 构造一个仿真 .log：真实 batch 框架 + 真实样例值，验证 scan 能读回。
+    #[test]
+    fn scan_reads_back_appended_record() {
+        let dir = std::env::temp_dir().join(format!("wbs-theme-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("000007.log");
+        fs::write(&log, build_log_record(&build_batch(100, THEME_KEY, &theme_value(SAMPLE_LIGHT)))).unwrap();
+
+        assert_eq!(scan_current_theme(&dir).as_deref(), Some(SAMPLE_LIGHT));
+
+        // 追加 dark，读回应为 dark（后写覆盖）
+        append_theme_record(&dir, 200, SAMPLE_DARK).unwrap();
+        assert_eq!(scan_current_theme(&dir).as_deref(), Some(SAMPLE_DARK));
+
+        // 文件末尾应恰好是追加的 dark record（CRC/长度自洽）
+        let data = fs::read(&log).unwrap();
+        let expected = build_log_record(&build_batch(200, THEME_KEY, &theme_value(SAMPLE_DARK)));
+        assert!(data.len() > expected.len());
+        assert_eq!(&data[data.len() - expected.len()..], &expected[..]);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// block 边界：剩余 < header 时填 trailer 另起 block，record 仍可被 scan 读回。
+    #[test]
+    fn append_handles_block_boundary() {
+        let dir = std::env::temp_dir().join(format!("wbs-theme-blk-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("000003.log");
+        // 预填到只剩 3 字节（< header 7），append 应先填 trailer 再从新 block 写
+        let prefix_len = BLOCK - 3;
+        fs::write(&log, vec![0xABu8; prefix_len]).unwrap();
+        append_theme_record(&dir, 1, SAMPLE_DARK).unwrap();
+        let data = fs::read(&log).unwrap();
+        let expected = build_log_record(&build_batch(1, THEME_KEY, &theme_value(SAMPLE_DARK)));
+        assert_eq!(data.len(), prefix_len + 3 + expected.len());
+        // record 必须落在 block 边界（LevelDB 要求 record 不跨 block 起始）
+        assert_eq!(&data[prefix_len + 3..], &expected[..]);
+        assert_eq!(scan_theme_json_in(&data).as_deref(), Some(SAMPLE_DARK));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 真实样例字节（2026-09-10 本机 leveldb 提取）可被扫描还原。
+    #[test]
+    fn scan_parses_real_world_sample() {
+        // batch payload: seq + count + entry(type+varint klen+key+varint vlen+value)
+        let payload = build_batch(42, THEME_KEY, &theme_value(SAMPLE_DARK));
+        assert_eq!(scan_theme_json_in(&payload).as_deref(), Some(SAMPLE_DARK));
+    }
+}

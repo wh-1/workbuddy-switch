@@ -600,6 +600,22 @@ pub async fn collect_official_usage(accounts: &[Value], at_ms: i64) -> Value {
         match fetch_account_usage(account, range_start, range_end).await {
             Ok(result) => {
                 successful_accounts += 1;
+                // 本地专属：官方逐笔明细全量落盘（按账号账本，不受切号对齐影响）
+                let ledger_rows: Vec<Value> = result
+                    .rows
+                    .iter()
+                    .map(|row| {
+                        json!({
+                            "requestId": row.request_id,
+                            "credit": row.credit,
+                            "model": row.model,
+                            "client": row.client,
+                            "requestTime": row.request_time,
+                            "ts": row.request_ts,
+                        })
+                    })
+                    .collect();
+                crate::modules::credit_ledger::append_account_rows(&account_id, &ledger_rows);
                 let (usage_today, usage_week, usage_month, daily) =
                     aggregate_rows(&result.rows, today);
                 total_today += usage_today;

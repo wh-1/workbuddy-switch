@@ -23,6 +23,9 @@ npm/bin/wb-switch-*
 accounts.json
 backups/
 
+# 本地诊断产物（可由 scripts/analysis 重新生成）
+reports/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
@@ -45,3 +48,16 @@ npm/platform/*/bin/
 .codex/
 .grok/
 /.workbuddy/
+
+# 环境变量（真实配置不入库，规范第 10.1 章）
+.env
+.env.local
+
+# 内部工作文档（含账号昵称/uid/积分等隐私，仅本地保留）
+HANDOFF.md
+docs/PROGRESS.md
+docs/6004_window_analysis.md
+docs/model_limits_ledger_design.md
+
+# 本机诊断脚本（含账号映射等隐私，仅本地保留）
+scripts/analysis/
