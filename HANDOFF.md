@@ -1,8 +1,8 @@
 # HANDOFF — workbuddy-switch
 
 > 更新：2026-09-13 凌晨 · 分支 dev · `6fb0323`（已推 origin/dev）
-> 本阶段：**切号体验收口**——① 对齐项默认全开 ② 复制会话与瘦身的冲突修复 ③ 对齐预览覆盖破坏性操作
-> 状态：**真机验证已通过**（四项默认全勾 + 预览三段齐全），进入收尾
+> 本阶段：**切号体验收口**——① 对齐项默认全开 ② 复制会话与瘦身的冲突修复 ③ 对齐预览覆盖破坏性操作 ④ 预览/真实执行一致性优化（A–E）
+> 状态：**全部真机验证通过**（默认全勾 + 预览三段 + 主题无条件提示 + 复制体量化），本阶段可结账
 > 前序（已归档 `docs/PROGRESS.md`）：项目侧栏同步真机验证 · 白屏终局 vite 8.3.0 · 6004 滑动窗口
 
 ## 进度（现在在哪）
@@ -46,7 +46,7 @@
 ## 下一步
 
 1. ~~真机验证三项~~ **已完成（03:41 通过）**，见「进度」段。
-2. ~~push origin dev 核验~~ **已核验（03:47）**：`git ls-remote origin dev` = `e4597d8` = 本地 HEAD，**已推送，无待推提交**。注：沙箱内 `git rev-list origin/dev..HEAD` 报 128 是**本地缺 `origin/dev` ref**（未 fetch）导致的假象，不是未推送——判定推送状态用 `git ls-remote`，别用 rev-list。
+2. ~~push origin dev 核验~~ **已核验（03:47；后续 `6fb0323`/`f5d114e`/`b3f5211`/`6f76df9` 均已推）**：`git ls-remote origin dev` = `e4597d8` = 本地 HEAD，**已推送，无待推提交**。注：沙箱内 `git rev-list origin/dev..HEAD` 报 128 是**本地缺 `origin/dev` ref**（未 fetch）导致的假象，不是未推送——判定推送状态用 `git ls-remote`，别用 rev-list。
 3. **上游 #32 监控**：若合并需跟进；本机已用「占位不复制」路线规避。
 4. **解死 hy3 窗口长（下次 hy3 触发时）**：跑 `scripts/analysis/find_6004_events.py`，锚 ≈3h vs 4.5h 二选一定案。
 5. **`model_daily_limit_check.py` 重窗方案重评**：先解释 credit_ledger 14:26:22 边界与滑动窗模型的兼容性，再定脚本去留。
@@ -62,7 +62,9 @@
    - **真机验证 09:45（主人实测）**：
      - ① **通过**——关掉「设置同步」后预览仍显示「界面主题：跟随目标账号」，且 storage/画像/my-files 三项归零（属设置同步，符合预期）。
      - ② **首轮未通过**——末行仍是模糊文案。**根因**：`switch-account-dialog.tsx` 的 `doPreview` 请求体**漏传 `copySessionIds`**（`doSwitch` 第 132 行有传），后端 `opts.copy_session_ids` 恒空 → `annotate_copy_impact` 直接 return。`SwitchOptions` 是 `rename_all=camelCase`，前端传 `copySessionIds` 可正确映射。
-     - 修复 `b3f5211`（+2 行）：`doPreview` 补 `copySessionIds: copySessions ? [...selected] : undefined`。tsc 0 错 + dist + GUI release 重编（09:48）。**待主人二验**：勾复制会话并**选中具体会话**后再预览，末行应出「本次复制的 N 条会被跳过，其中 K 条落在上述 M 个瘦身项目」。
+     - 修复 `b3f5211`（+2 行）：`doPreview` 补 `copySessionIds: copySessions ? [...selected] : undefined`。tsc 0 错 + dist + GUI release 重编（09:48）。
+     - **二验通过（09:53，主人实测）**：未选会话 → 原文案；选中 1 条 → 「实际执行时本次复制的 1 条会被跳过，其中 1 条落在上述 1 个瘦身项目，实际删除数更少」。A–E 五项全部验证闭环。
      - 行为边界：只勾「复制会话」开关而**未勾选具体会话**时 `selected` 为空，仍走原模糊文案（此时待复制数为 0，属预期）。
+     - **坑位**：切号弹窗里「预览」与「切换」是两条独立请求体，加字段必须两处同改（`doPreview` 181-189 / `doSwitch` 130-138）；与「勾选项默认值两处」同类双写陷阱。
 10. **沙箱 git 视图坑（新增）**：沙箱内 `git fetch` 会打印 `[new branch] dev -> origin/dev` 但**本地 refs 实际不落盘**（下一条 `git branch -r` 看不到）。→ 判定是否已推只用 `git ls-remote <remote> <branch>`；`git rev-list origin/dev..HEAD` 报 128 是假象，不是未推送。
 7. src-tauri devtools feature 保留（诊断用，release 无副作用）——已定，无需处理。
