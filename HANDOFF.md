@@ -59,6 +59,10 @@
    - **C（预览瘦身数偏大）已修**：`preview_sync` 新增 `copy_session_ids` 参数（switch.rs 预览分支传 `opts.copy_session_ids`），经 `session_cwds()` 查 cwd，与 `slim.groups` 求交，输出 `slim.copyPlanned{total,hitCount,hitProjects}`；前端文案由「删除数可能更少」升级为「本次复制的 N 条会被跳过，其中 K 条落在上述 M 个瘦身项目」。匹配逻辑抽纯函数 `copy_hits()` 并带单测。
    - **D（传参隐患）已修**：`append_project_and_slim` 去掉独立 `dry_run` 参数，统一读 `opts.dry_run`；`preview_sync`/`post_close_sync` 先把 `dry_run` 写进 opts 克隆再传入，杜绝两处不一致。
    - **E（重复代码）已修**：抽 `run_switch_sync(target_acc, opts, protected_ids, copy_session_ids)`，两入口只留主题分歧；五项短路条件抽 `AlignOptions::any_enabled()`。
-   - **真机待验（GUI/server 已重编 04:11）**：① 关掉「设置同步」后点预览，应**仍显示**「界面主题：跟随目标账号」；② 勾选复制会话 + 瘦身时预览末行应出现「本次复制的 N 条会被跳过，其中 K 条落在上述 M 个瘦身项目」。
+   - **真机验证 09:45（主人实测）**：
+     - ① **通过**——关掉「设置同步」后预览仍显示「界面主题：跟随目标账号」，且 storage/画像/my-files 三项归零（属设置同步，符合预期）。
+     - ② **首轮未通过**——末行仍是模糊文案。**根因**：`switch-account-dialog.tsx` 的 `doPreview` 请求体**漏传 `copySessionIds`**（`doSwitch` 第 132 行有传），后端 `opts.copy_session_ids` 恒空 → `annotate_copy_impact` 直接 return。`SwitchOptions` 是 `rename_all=camelCase`，前端传 `copySessionIds` 可正确映射。
+     - 修复 `b3f5211`（+2 行）：`doPreview` 补 `copySessionIds: copySessions ? [...selected] : undefined`。tsc 0 错 + dist + GUI release 重编（09:48）。**待主人二验**：勾复制会话并**选中具体会话**后再预览，末行应出「本次复制的 N 条会被跳过，其中 K 条落在上述 M 个瘦身项目」。
+     - 行为边界：只勾「复制会话」开关而**未勾选具体会话**时 `selected` 为空，仍走原模糊文案（此时待复制数为 0，属预期）。
 10. **沙箱 git 视图坑（新增）**：沙箱内 `git fetch` 会打印 `[new branch] dev -> origin/dev` 但**本地 refs 实际不落盘**（下一条 `git branch -r` 看不到）。→ 判定是否已推只用 `git ls-remote <remote> <branch>`；`git rev-list origin/dev..HEAD` 报 128 是假象，不是未推送。
 7. src-tauri devtools feature 保留（诊断用，release 无副作用）——已定，无需处理。
