@@ -9,6 +9,7 @@
     "dev:screenshot": "VITE_DEMO_MODE=1 vite",
     "tauri:dev:screenshot": "WB_SWITCH_SCREENSHOT_DEMO=1 VITE_DEMO_MODE=1 tauri dev",
     "build": "tsc && vite build",
+    "verify": "node node_modules/typescript/bin/tsc --noEmit && cargo test -p wb-switch-core",
     "build:demo": "tsc && VITE_DEMO_MODE=1 VITE_PAGES_DEMO=1 vite build",
     "preview": "vite preview",
     "tauri": "tauri",
