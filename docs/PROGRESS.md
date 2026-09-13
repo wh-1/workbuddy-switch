@@ -140,3 +140,12 @@
 - **新坑位**：① 切号弹窗「预览」与「切换」是两条独立请求体，加字段必须两处同改；② 备份目录名必须毫秒级；③ 沙箱内 `git fetch` 假成功、refs 不落盘，判定推送状态只用 `git ls-remote`。
 - 产物：dist + GUI release（09:48）+ server release 均已重编；dev 推至 `3530eab`。
 - **附带决策**：用户级技能 `delivery-no-pseudoblock` 评估后**卸载**（主人定）——两轮实测 D1–D12 全空零拦截，与项目「读档后等放行」纪律冲突，且 D7/D8/D9 与本项目 cargo+tsc 双门重复。副本保留在 `~/.workbuddy/skills-disabled/`，移回即恢复。
+
+## 2026-09-13 中午 · PR 评估 + 对外沟通（零代码改动）
+
+- 代码停在 `dbf4141`（已推 origin/dev）；本阶段只动 `HANDOFF.md` / `docs/PROGRESS.md` / `.workbuddy/memory/`。
+- 双门复核：`cargo test -p wb-switch-core` 198 绿、`tsc --noEmit` 0 错（无代码改动，属例行体检）。
+- 对外动作：issue **#30** 正文 1873 → 738 字符（改为 结论→原因→影响范围→参考→环境）；新增讨论 issue **#35**「[讨论] 切号带会话：复制 / 归属移动 / 项目占位，选哪种语义？」（https://github.com/changexbc/workbuddy-switch/issues/35 ，1042 字符）。**#32 评论稿定稿但未发**，等 #35 有回应后再发。
+- 提 PR 评估结论（dev 对 upstream v0.1.37，64 提交 / 51 文件）：**P1** = 账号发现 / 设置同步（L4+L5+L1，不含 L3、不含瘦身）/ 项目侧栏同步，均须默认关闭、各用独立分支；**P2** = 主题跟随、显式时间窗、Windows 测试兼容两处；**不提** = 分析脚本、credit_ledger/oplog、vite8+React19 本地权宜、仓库纪律文件。#30 维持只留 issue。
+- 新增坑位 19–21：WebFetch 15 分钟 URL 缓存（回读 GitHub 必须直连 API）、项目 `MEMORY.md` 3000 字节注入上限、`find_6004_events.py` 的 UTC→+8 未转 bug。
+- 记忆治理：项目 `MEMORY.md` 11951 → 2913 字节（压缩为「结论 + 指针」，全文备份 `.workbuddy/memory/MEMORY-full-2026-09-13.md`）。
