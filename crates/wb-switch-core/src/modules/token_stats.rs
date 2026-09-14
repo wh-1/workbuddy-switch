@@ -48,6 +48,10 @@ impl Totals {
     fn value(&self) -> Value {
         let cache_hit_rate = (self.usage.input > 0)
             .then(|| self.usage.read as f64 / self.usage.input as f64);
+        // 每次调用的平均输入。命中率只说明「已付的输入没被重复计价」，真正的成本靶点
+        // 是这个数：它包含每轮都要重发的前缀（system / 指令 / 工具定义）与上下文。
+        let avg_input_per_record = (self.records > 0)
+            .then(|| self.usage.input as f64 / self.records as f64);
         // `input` already includes cache reads; expose the same headline total
         // used by the dashboard without double-counting the cached portion.
         let total = self
@@ -64,6 +68,7 @@ impl Totals {
             "uncachedInput": self.usage.input.saturating_sub(self.usage.read),
             "records": self.records,
             "cacheHitRate": cache_hit_rate,
+            "avgInputPerRecord": avg_input_per_record,
         })
     }
 }
@@ -922,6 +927,31 @@ mod tests {
             })
         );
 
+    }
+
+    #[test]
+    fn value_reports_average_input_per_record() {
+        // 没有记录时不给平均值，避免除零编造出一个 0
+        assert_eq!(Totals::default().value()["avgInputPerRecord"], Value::Null);
+
+        let mut totals = Totals::default();
+        totals.add(Usage {
+            input: 100,
+            output: 10,
+            read: 90,
+            write: 1,
+        });
+        totals.add(Usage {
+            input: 300,
+            output: 20,
+            read: 100,
+            write: 0,
+        });
+
+        let value = totals.value();
+        assert_eq!(value["records"], 2);
+        assert_eq!(value["avgInputPerRecord"], 200.0);
+        assert_eq!(value["cacheHitRate"], 190.0_f64 / 400.0);
     }
 
     #[test]
