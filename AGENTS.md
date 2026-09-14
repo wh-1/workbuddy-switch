@@ -37,14 +37,15 @@ Managed by Trellis. Edits outside this block are preserved; edits inside may be 
 ## 阶段交接（上下文纪律）— 本地追加段
 
 > 本段位于 Trellis 托管块（`<!-- TRELLIS:START/END -->`）**之外**，`trellis update` 不会覆盖。
-> 本项目 `HANDOFF.md` 已有自有格式，**沿用即可**；下次收尾时按《`收尾` 通用序列》第 3 步对齐其结构。
+> 本项目 `.memory/HANDOFF.md` 已有自有格式，**沿用即可**；下次收尾时按《`收尾` 通用序列》第 3 步对齐其结构。
 
 - 收到 **`收尾`** = 执行 **`SKILL.md` →《`收尾` 通用序列》（唯一定义处，本文件不复述）**，再加本项目追加项：
   - **追加 1**：改动后跑 `cargo test` + `npx tsc --noEmit`，两者全绿再提交（完整构建另可 `npm run build`）。
   - **追加 2**：commit 遵循本文件「Git Commit Language」节 —— Conventional Commit 前缀 + 中文标题 / 正文。
-- 收到 **`读档`**（读盘）= 读 `HANDOFF.md` → 复述进度 / 下一步 → **等确认，不动手**。
+- 收到 **`读档`**（读盘）= 读 `.memory/HANDOFF.md` → 复述进度 / 下一步 → **等确认，不动手**。
 - 收到 **`继续`**（放行）= 确认无误，开始改代码。
-- **交接载体是 `HANDOFF.md`**：`TaskCreate` / `TaskList` 只作**本会话**推进跟踪，**不跨会话保留**，别把"下一步"只落在任务列表里。
+- **交接载体是 `.memory/HANDOFF.md`**：`TaskCreate` / `TaskList` 只作**本会话**推进跟踪，**不跨会话保留**，别把"下一步"只落在任务列表里。
+- **入库口径（覆盖声明 2026-09-15）**：状态文档被 `.gitignore` 忽略（`HANDOFF.md` / `docs/PROGRESS.md`），**仅本地留存**——开源预备口径，入库判定看目标仓。
 - 上下文卫生：命令输出必限流（`| head` / `--limit`），大文件先 Grep 定位再分段读，不在对话里贴大段代码。
 - 压缩 ≥2 次 → 立刻收尾换会话。
 
