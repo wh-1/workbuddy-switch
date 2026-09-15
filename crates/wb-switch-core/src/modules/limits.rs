@@ -28,9 +28,12 @@ const MERGE_WINDOW_SECS: i64 = 15;
 const SAME_KEY_WINDOW_SECS: i64 = 60;
 /// 冷启动（无索引）时只读最近这么多小时被写过的文件 —— 否则首跑要啃全量 3GB+。
 const COLD_WINDOW_HOURS: i64 = 24;
-const RESET_MARK: &str = "将在 ";
+/// 解锁时刻前缀：国内版「将在 … 重置」、国际版「will reset at …」——两套都要认，
+/// 否则国际版一条事件都读不到（两者都以 `UTC+8` 结尾，解析逻辑共用）。
+const RESET_MARKS: [&str; 2] = ["将在 ", "will reset at "];
 const RESET_ZONE: &str = "UTC+8";
-const LIMIT_MARK: &str = "使用量已超出频率限制";
+/// 限流标志：国内版中文 / 国际版英文。缺一组 = 整类漏读。
+const LIMIT_MARKS: [&str; 2] = ["使用量已超出频率限制", "usage exceeds frequency limit"];
 /// SDK 日志里 code 嵌在转义 JSON 中，两种形态都收。
 const LIMIT_JSON_MARKS: [&str; 2] = ["\"code\":6004", "\\\"code\\\":6004"];
 /// 沙箱会把自己命令的 stdout 回写进工作区日志，内容里若含 reset 文案就是**自污染**。
@@ -111,31 +114,67 @@ fn parse_biz_ts(line: &str) -> Option<DateTime<Utc>> {
 
 /// 解锁时刻：`将在 2026-09-14 01:44:40 UTC+8 重置`。文案自带 UTC+8 → 固定按 +8 解释，不做本地换算。
 fn parse_reset(line: &str) -> Option<DateTime<Utc>> {
-    let rest = find_after(line, RESET_MARK)?;
-    let stamp = rest.get(..19)?;
-    if !rest.get(19..)?.trim_start().starts_with(RESET_ZONE) {
-        return None;
+    for mark in RESET_MARKS {
+        let Some(rest) = find_after(line, mark) else { continue };
+        let (Some(stamp), Some(tail)) = (rest.get(..19), rest.get(19..)) else { continue };
+        if !tail.trim_start().starts_with(RESET_ZONE) {
+            continue;
+        }
+        let naive = NaiveDateTime::parse_from_str(stamp, "%Y-%m-%d %H:%M:%S").ok()?;
+        return bj().from_local_datetime(&naive).single().map(|dt| dt.with_timezone(&Utc));
     }
-    let naive = NaiveDateTime::parse_from_str(stamp, "%Y-%m-%d %H:%M:%S").ok()?;
-    bj().from_local_datetime(&naive).single().map(|dt| dt.with_timezone(&Utc))
+    None
 }
 
-/// 会话 id：`(32hex/会话UUID)` 的**斜杠之后**（32hex 是请求相关性 ID，不是账号，别取错）。
-/// 回退到 `sessionId=<UUID>`。
-fn parse_session(line: &str) -> Option<String> {
+/// 事件行里的 `(requestId/会话UUID)` —— **两个都是有用信息**：
+/// 32hex 是模型归因的首选键（`[ModelProvider]` 行可精确匹到 model），
+/// UUID 才是会话 id（用于查账号）。早期版本把 32hex 当账号用过，别再取错。
+fn parse_ids(line: &str) -> Option<(String, String)> {
     for (idx, _) in line.match_indices('(') {
         let Some(seg) = line.get(idx + 1..) else { continue };
         let Some(inner) = seg.get(..seg.find(')')?) else { continue };
         if let Some((hex, uuid)) = inner.split_once('/') {
             if is_hex32(hex) && is_uuid(uuid) {
-                return Some(uuid.to_string());
+                return Some((hex.to_string(), uuid.to_string()));
             }
         }
+    }
+    None
+}
+
+/// 会话 id：`(32hex/会话UUID)` 的**斜杠之后**。回退到 `sessionId=<UUID>`。
+fn parse_session(line: &str) -> Option<String> {
+    if let Some((_, uuid)) = parse_ids(line) {
+        return Some(uuid);
     }
     find_after(line, "sessionId=")
         .and_then(|s| s.get(..36))
         .filter(|s| is_uuid(s))
         .map(|s| s.to_string())
+}
+
+/// `(requestId/会话UUID)` 的**斜杠之前** —— 模型归因首选键。
+fn parse_request_id(line: &str) -> Option<String> {
+    parse_ids(line).map(|(hex, _)| hex)
+}
+
+/// `[ModelProvider] Sending request: agent=cli, model=X, requestId=<32hex>, stream=true`
+/// —— 用 requestId 精确匹出**触发这次限流的模型**。两个键的先后不保证 → 各取各的。
+fn parse_provider_model(line: &str) -> Option<(String, String)> {
+    if !line.contains("[ModelProvider]") || !line.contains("Sending request") {
+        return None;
+    }
+    let rid = find_after(line, "requestId=")?.get(..32)?;
+    if !is_hex32(rid) {
+        return None;
+    }
+    let rest = find_after(line, "model=")?;
+    let end = rest.find([',', ' ', '"']).unwrap_or(rest.len());
+    let model = normalize_model(&rest[..end]);
+    if model.is_empty() {
+        return None;
+    }
+    Some((rid.to_string(), model))
 }
 
 /// `sendPrompt` 行里的 modelId（JSON 子串解析，不引 regex 依赖）。
@@ -147,7 +186,8 @@ fn parse_model(line: &str) -> Option<String> {
 }
 
 fn is_limit_line(line: &str) -> bool {
-    line.contains(LIMIT_MARK) || LIMIT_JSON_MARKS.iter().any(|m| line.contains(m))
+    LIMIT_MARKS.iter().any(|m| line.contains(m))
+        || LIMIT_JSON_MARKS.iter().any(|m| line.contains(m))
 }
 
 #[derive(Clone, Debug)]
@@ -155,6 +195,8 @@ struct Raw {
     src: &'static str,
     ts: Option<DateTime<Utc>>,
     session: Option<String>,
+    /// 事件行里的 requestId —— 模型归因首选键（精确匹配 `[ModelProvider]` 行）
+    request_id: Option<String>,
     model: Option<String>,
     unlock: Option<DateTime<Utc>>,
 }
@@ -190,8 +232,14 @@ pub struct LimitState {
     pub remaining_secs: i64,
 }
 
-fn logs_root() -> PathBuf {
-    config::home_dir().join(".workbuddy").join("logs")
+/// 日志根：国内版 `~/.workbuddy/logs`、国际版 `~/.workbuddy-ai/logs`。
+/// 两边都列出来——只装了其中一个时另一个 `read_dir` 直接失败，无害。
+fn logs_roots() -> Vec<PathBuf> {
+    let home = config::home_dir();
+    vec![
+        home.join(".workbuddy").join("logs"),
+        home.join(".workbuddy-ai").join("logs"),
+    ]
 }
 
 fn read_lossy(path: &std::path::Path) -> Option<String> {
@@ -202,16 +250,18 @@ fn read_lossy(path: &std::path::Path) -> Option<String> {
 
 fn day_dirs(cutoff_day: Option<NaiveDate>) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    let Ok(entries) = fs::read_dir(logs_root()) else { return out };
-    for e in entries.flatten() {
-        let name = e.file_name().to_string_lossy().into_owned();
-        let Ok(day) = NaiveDate::parse_from_str(&name, "%Y-%m-%d") else { continue };
-        if let Some(cut) = cutoff_day {
-            if day < cut {
-                continue;
+    for root in logs_roots() {
+        let Ok(entries) = fs::read_dir(root) else { continue };
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let Ok(day) = NaiveDate::parse_from_str(&name, "%Y-%m-%d") else { continue };
+            if let Some(cut) = cutoff_day {
+                if day < cut {
+                    continue;
+                }
             }
+            out.push(e.path());
         }
-        out.push(e.path());
     }
     out.sort();
     out
@@ -249,6 +299,8 @@ fn scan_raw(idx: &Index) -> (Vec<Raw>, BTreeMap<String, FileState>) {
     let mut files: BTreeMap<String, FileState> = BTreeMap::new();
     let mut raw: Vec<Raw> = Vec::new();
     let mut sends: HashMap<String, Vec<(DateTime<Utc>, String)>> = HashMap::new();
+    // requestId → model（`[ModelProvider]` 行累积，跨文件也安全：requestId 全局唯一）
+    let mut rid_models: HashMap<String, String> = HashMap::new();
 
     for day in day_dirs(None) {
         // A 主源：sdk/conversations/*.log（文件名 = 会话 id，时间戳 UTC）
@@ -280,6 +332,7 @@ fn scan_raw(idx: &Index) -> (Vec<Raw>, BTreeMap<String, FileState>) {
                             src: "sdk",
                             ts: parse_sdk_ts(line),
                             session: Some(stem.clone()),
+                            request_id: None,
                             model: None,
                             unlock: parse_reset(line),
                         });
@@ -304,13 +357,22 @@ fn scan_raw(idx: &Index) -> (Vec<Raw>, BTreeMap<String, FileState>) {
                 }
                 let Some(text) = read_lossy(&path) else { continue };
                 for line in text.lines() {
-                    if ECHO_MARKS.iter().any(|m| line.contains(m)) || !is_limit_line(line) {
+                    if ECHO_MARKS.iter().any(|m| line.contains(m)) {
+                        continue;
+                    }
+                    // 先攒模型索引（该行与限流行同文件，扫到即用）
+                    if let Some((rid, model)) = parse_provider_model(line) {
+                        rid_models.insert(rid, model);
+                        continue;
+                    }
+                    if !is_limit_line(line) {
                         continue;
                     }
                     raw.push(Raw {
                         src: "biz",
                         ts: parse_biz_ts(line),
                         session: parse_session(line),
+                        request_id: parse_request_id(line),
                         model: None,
                         unlock: parse_reset(line),
                     });
@@ -322,8 +384,16 @@ fn scan_raw(idx: &Index) -> (Vec<Raw>, BTreeMap<String, FileState>) {
     for seq in sends.values_mut() {
         seq.sort();
     }
-    // 模型归因：触发时刻前、同会话最近一次 sendPrompt
+    // 模型归因：① requestId 精确匹配（最准：它就是触发这次限流的那次请求，实测 118/118）
+    // ② 触发前同会话最近一次 sendPrompt（SDK 源 / 拿不到 requestId 时）
+    // ③ sessions.model（最后兜底，见 resolve_models）
     for r in raw.iter_mut() {
+        if let Some(rid) = r.request_id.as_deref() {
+            if let Some(m) = rid_models.get(rid) {
+                r.model = Some(m.clone());
+                continue;
+            }
+        }
         let (Some(sid), Some(ts)) = (r.session.clone(), r.ts) else { continue };
         if let Some(seq) = sends.get(&sid) {
             let mut best = None;
@@ -425,35 +495,6 @@ fn resolve_models(sids: &[String]) -> HashMap<String, String> {
         }
     }
     out
-}
-
-/// 强制读取某会话的 SDK 日志，取 `ts_ms` 之前（含）最近一次 sendPrompt 的 modelId。
-/// 用于增量扫描跳过未变文件、而该会话的 6004 事件只进了业务日志的场景
-/// （SDK 文件写满 10MiB 停写后，触发请求的 sendPrompt 不在增量窗口内）。
-fn force_read_last_model(sid: &str, ts_ms: i64) -> Option<String> {
-    for day in day_dirs(None) {
-        let path = day.join("sdk").join("conversations").join(format!("{sid}.log"));
-        if !path.exists() {
-            continue;
-        }
-        let text = read_lossy(&path)?;
-        let mut best = None;
-        for line in text.lines() {
-            if !line.contains("method:sendPrompt") {
-                continue;
-            }
-            let Some(sts) = parse_sdk_ts(line) else { continue };
-            if sts.timestamp_millis() > ts_ms {
-                break;
-            }
-            if let Some(m) = parse_model(line) {
-                best = Some(m);
-            }
-        }
-        // 同一会话文件只存在于一个日期目录
-        return best;
-    }
-    None
 }
 
 fn index_path() -> PathBuf {
@@ -601,42 +642,26 @@ pub fn collect(limit_days: u32) -> Vec<LimitEvent> {
     }
     idx.version = 2;
 
-    // 模型兜底（幂等 + 自愈）：sendPrompt 序列归因失败时，按
-    // 「强制补读 SDK 文件 > sessions.model」回填，补读结果可覆盖旧兜底值。
-    // 场景：SDK 会话日志写满 10MiB 停写后，6004 事件只进业务日志，
-    // 该会话 sends 本轮为空（文件未变被增量跳过）；而被限后用户常立刻切模型，
-    // sessions.model 是切换后的模型，会错归 → 只作最后兜底。
-    // 仅处理近 48h 事件（滑动窗 W ≤ 24h，更早的归因不影响当前 chip），
-    // 避免每次刷新都重读历史大文件。
+    // 模型兜底：①② 都没取到时填 `sessions.model`。
+    // 它代表"会话当前模型"，被限后用户常立刻切模型会错归 → **只填 None，不覆盖已有归因**。
+    // 仅处理近 48h 事件（滑动窗 W ≤ 24h，更早的归因不影响当前 chip），省一次全量 DB 查询。
     let cutoff_48h = Utc::now().timestamp_millis() - 48 * 3600 * 1000;
     let mut all_sids: Vec<String> = idx
         .events
         .iter()
-        .filter(|e| e.ts_epoch_ms >= cutoff_48h)
+        .filter(|e| e.ts_epoch_ms >= cutoff_48h && e.model.is_none())
         .filter_map(|e| e.session.clone())
         .collect();
     all_sids.sort();
     all_sids.dedup();
     let fb_models = resolve_models(&all_sids);
     for e in idx.events.iter_mut() {
-        if e.ts_epoch_ms < cutoff_48h {
+        if e.ts_epoch_ms < cutoff_48h || e.model.is_some() {
             continue;
         }
         let Some(sid) = e.session.clone() else { continue };
-        let fb_model = fb_models.get(&sid);
-        // 兜底候选：无模型；或模型恰等于 sessions.model（可能来自上一轮兜底，待补读纠错）
-        let flagged =
-            e.model.is_none() || matches!((&e.model, fb_model), (Some(m), Some(f)) if m == f);
-        if !flagged {
-            continue;
-        }
-        match force_read_last_model(&sid, e.ts_epoch_ms) {
-            Some(m) => e.model = Some(m),
-            None => {
-                if e.model.is_none() {
-                    e.model = fb_model.cloned();
-                }
-            }
+        if let Some(m) = fb_models.get(&sid) {
+            e.model = Some(normalize_model(m));
         }
     }
 
@@ -715,6 +740,41 @@ mod tests {
     const BIZ_LINE: &str = "[2026/9/9 10:01:17.098] [Info] [pid=14148] [Interruption] Catch block entered, error: 429 您的使用量已超出频率限制，将在 2026-09-09 13:54:23 UTC+8 重置，您也可以切换其他模型继续使用。 (5c5090fe9c5047ac870f2e32f4366d0b/c522dc02-672a-419c-b6d0-0eccec45126a)";
     const SDK_EVENT_LINE: &str = "2026-09-13T04:53:35.100Z runtime.applyStopReason {\"event\":\"TURN_ERROR\",\"errorMessageMetaPreview\":\"{\\\"code\\\":6004,\\\"message\\\":\\\"Quota exceeded: 429 您的使用量已超出频率限制，将在 2026-09-14 01:44:40 UTC+8 重置\\\"}\"}";
     const SEND_LINE: &str = "2026-09-12T17:50:13.490Z method:sendPrompt {\"modelId\":\"deepseek-v4.1-flash-f\"}";
+    /// 国际版：限流文案是英文，但位置/格式/时区后缀完全一致
+    const INTL_LINE: &str = "[2026/9/13 20:07:05.164] [Info] [pid=18232] [Interruption] Catch block entered, error: 429 usage exceeds frequency limit, but don't worry, your usage will reset at 2026-09-14 10:59:21 UTC+8, alternatively, you can switch to the other models to continue using it. (5c5090fe9c5047ac870f2e32f4366d0b/c522dc02-672a-419c-b6d0-0eccec45126a)";
+    const PROVIDER_LINE: &str = "[2026/9/9 08:54:24.654] [Info] [pid=13604] [ModelProvider]  [ModelProvider] Sending request: agent=cli, model=hy4-preview, requestId=5c5090fe9c5047ac870f2e32f4366d0b, stream=true, url=https://copilot.tencent.com/v2/chat/";
+
+    #[test]
+    fn parses_international_english_line() {
+        // 只认中文关键词时这一整类会被漏读
+        assert!(is_limit_line(INTL_LINE));
+        assert_eq!(fmt_bj(parse_reset(INTL_LINE).unwrap()), "2026-09-14 10:59:21");
+        assert_eq!(
+            parse_session(INTL_LINE).as_deref(),
+            Some("c522dc02-672a-419c-b6d0-0eccec45126a")
+        );
+    }
+
+    #[test]
+    fn request_id_is_the_hex_before_slash() {
+        assert_eq!(
+            parse_request_id(BIZ_LINE).as_deref(),
+            Some("5c5090fe9c5047ac870f2e32f4366d0b")
+        );
+        assert_eq!(parse_request_id(INTL_LINE), parse_request_id(BIZ_LINE));
+    }
+
+    #[test]
+    fn provider_line_yields_request_id_to_model() {
+        let (rid, model) = parse_provider_model(PROVIDER_LINE).expect("provider");
+        assert_eq!(rid, "5c5090fe9c5047ac870f2e32f4366d0b");
+        assert_eq!(model, "hy4-preview");
+        // 同一 requestId 就是限流行里那次请求 → 精确归因
+        assert_eq!(parse_request_id(BIZ_LINE).as_deref(), Some(rid.as_str()));
+        // 非 ModelProvider 行不参与索引
+        assert!(parse_provider_model(BIZ_LINE).is_none());
+        assert!(parse_provider_model(SEND_LINE).is_none());
+    }
 
     #[test]
     fn parses_business_line_fully() {
@@ -796,6 +856,7 @@ mod tests {
             src,
             ts: Some(parse(ts)),
             session: sid.map(|s| s.to_string()),
+            request_id: None,
             model: model.map(|s| s.to_string()),
             unlock: Some(parse(unlock)),
         }
