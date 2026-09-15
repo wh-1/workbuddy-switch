@@ -12,7 +12,7 @@ use std::collections::HashSet;
 
 use serde_json::{json, Value};
 
-use super::cloud_conv::{self, CloudDelete};
+use super::cloud_conv::CloudDelete;
 
 /// 对账结果。`victims` 只含 `CloudOnly`；`unknown` 仅报告不动作。
 #[derive(Debug, Default, PartialEq)]
@@ -82,6 +82,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::modules::cloud_conv;
     use std::collections::HashSet;
 
     fn set(items: &[&str]) -> HashSet<String> {
