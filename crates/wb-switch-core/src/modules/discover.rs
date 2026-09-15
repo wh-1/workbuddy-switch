@@ -38,7 +38,7 @@ fn scan_auth_history_in(dir: &std::path::Path, current: &std::path::Path) -> Vec
         }
     };
 
-    let mut seen: HashMap<String, (i64, Value)> = HashMap::new();
+    let mut seen: HashMap<String, (String, i64, Value)> = HashMap::new();
     for entry in entries.flatten() {
         let path = entry.path();
         let name = path
@@ -62,6 +62,17 @@ fn scan_auth_history_in(dir: &std::path::Path, current: &std::path::Path) -> Vec
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
+        // 新旧判据：**主判据 = 文件名内嵌的 ISO 时间戳**（`workbuddy-desktop.<ISO8601>.….info`）。
+        // 理由：该时间戳由客户端写入备份时生成、天然有序；而 mtime 在快速连续写入时会落在
+        // 同一毫秒，导致「同 uid 取最新」取错（2026-09-16 修此 bug，由测试
+        // `scan_keeps_newest_per_uid_and_skips_current` 捕获）。
+        // ISO 8601 字符串的**字典序 == 时间序**，故直接字符串比较，无需日期运算；
+        // 解析不到时间戳时退化为空串，实际由 mtime 决定。
+        let stamp = name
+            .strip_prefix("workbuddy-desktop.")
+            .and_then(|rest| rest.split('.').next())
+            .unwrap_or("")
+            .to_string();
         let Some(rec) = imported_account_from_root(root) else {
             continue; // 无 access_token 的备份无恢复价值
         };
@@ -70,13 +81,18 @@ fn scan_auth_history_in(dir: &std::path::Path, current: &std::path::Path) -> Vec
             continue;
         }
         match seen.get(&uid) {
-            Some((prev_mtime, _)) if *prev_mtime >= mtime => continue,
+            Some((prev_stamp, prev_mtime, _))
+                if prev_stamp.as_str() > stamp.as_str()
+                    || (prev_stamp.as_str() == stamp.as_str() && *prev_mtime >= mtime) =>
+            {
+                continue
+            }
             _ => {
-                seen.insert(uid, (mtime, rec));
+                seen.insert(uid, (stamp, mtime, rec));
             }
         }
     }
-    seen.into_values().collect()
+    seen.into_values().map(|(_, mtime, rec)| (mtime, rec)).collect()
 }
 
 fn backup_accounts_file() -> Option<PathBuf> {
