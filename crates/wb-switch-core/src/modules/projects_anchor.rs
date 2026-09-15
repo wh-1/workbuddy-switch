@@ -414,7 +414,12 @@ pub(crate) fn slim_sessions_in_db_cloud(
 
     let mut deleted = 0usize;
     // 云端侧统计
+    // `deleted` = 合计（200 + 404）；`removed` = 真被这次请求删掉（200）；
+    // `already_gone` = 云端本来就没有（404）。**只有 200 才能证明删成功** ——
+    // 两个数字混在一起时，报告无法自证「到底真删了没」（2026-09-15 实测教训）。
     let mut cloud_deleted = 0usize;
+    let mut cloud_removed = 0usize;
+    let mut cloud_already_gone = 0usize;
     let mut cloud_forbidden = 0usize;
     let mut cloud_failed = 0usize;
     let mut cloud_no_mapping = 0usize;
@@ -439,9 +444,16 @@ pub(crate) fn slim_sessions_in_db_cloud(
                     cloud_planned += 1;
                 } else {
                     let token = c.token.as_deref().unwrap_or("");
-                    match crate::modules::cloud_conv::delete_conversation(token, id) {
-                        crate::modules::cloud_conv::CloudDelete::Deleted => cloud_deleted += 1,
-                        crate::modules::cloud_conv::CloudDelete::AlreadyGone => cloud_deleted += 1,
+                    let outcome = crate::modules::cloud_conv::delete_conversation(token, id);
+                    match &outcome {
+                        crate::modules::cloud_conv::CloudDelete::Deleted => {
+                            cloud_deleted += 1;
+                            cloud_removed += 1;
+                        }
+                        crate::modules::cloud_conv::CloudDelete::AlreadyGone => {
+                            cloud_deleted += 1;
+                            cloud_already_gone += 1;
+                        }
                         crate::modules::cloud_conv::CloudDelete::Forbidden => {
                             cloud_forbidden += 1;
                         }
@@ -452,6 +464,7 @@ pub(crate) fn slim_sessions_in_db_cloud(
                             allow_local = false;
                         }
                     }
+                    append_cloud_delete_audit(uid, id, &outcome);
                 }
             } else if c.channels.contains_key(id.as_str()) {
                 cloud_foreign += 1;
@@ -490,6 +503,8 @@ pub(crate) fn slim_sessions_in_db_cloud(
             "tokenReady": cloud_token_ok,
             "planned": cloud_planned,
             "deleted": cloud_deleted,
+            "removed": cloud_removed,
+            "alreadyGone": cloud_already_gone,
             "forbidden": cloud_forbidden,
             "failed": cloud_failed,
             "keptLocal": cloud_kept.len(),
@@ -500,6 +515,44 @@ pub(crate) fn slim_sessions_in_db_cloud(
         });
     }
     Ok(report)
+}
+
+/// 逐条云端删除审计 → `~/.wb-switch/cloud_delete_log.jsonl`（一行一条 JSON）。
+///
+/// 为什么单独留这个文件：统计报告里 `deleted` 是 200 与 404 的**合计**，
+/// 事后无法回答「这次到底真删了几条」。App 侧日志也不记录我们直连的请求
+/// （我们走 `POST /console/as/conversations/{sid}/delete`，不经 App 的
+/// `syncDeleteConversation`）⇒ 逐条落盘是**唯一**可事后核验的证据源。
+///
+/// 只记录真实执行（非 dry_run），写失败不影响业务。
+fn append_cloud_delete_audit(uid: &str, sid: &str, outcome: &crate::modules::cloud_conv::CloudDelete) {
+    use std::io::Write;
+    let path = home_dir().join(".wb-switch").join("cloud_delete_log.jsonl");
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    // 简易轮转：超过 2 MiB 直接换名覆盖，避免无限增长（审计只需近期）。
+    if std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) > 2 * 1024 * 1024 {
+        let _ = std::fs::rename(&path, path.with_extension("jsonl.old"));
+    }
+    let (result, detail) = match outcome {
+        crate::modules::cloud_conv::CloudDelete::Deleted => ("removed", "http 200"),
+        crate::modules::cloud_conv::CloudDelete::AlreadyGone => ("already_gone", "http 404"),
+        crate::modules::cloud_conv::CloudDelete::Forbidden => ("forbidden", "http 403"),
+        crate::modules::cloud_conv::CloudDelete::Failed(m) => ("failed", m.as_str()),
+    };
+    let line = json!({
+        "at": now_ms(),
+        "ts": utc_iso(),
+        "uid": uid,
+        "sid": sid,
+        "result": result,
+        "detail": detail,
+    })
+    .to_string();
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(f, "{line}");
+    }
 }
 
 /// 备份目录时间戳：毫秒级。
@@ -779,6 +832,11 @@ mod tests {
         let rep2 = slim_sessions_in_db_cloud(&db, "uid-a", 1, false, &[], Some(&ctx)).unwrap();
         assert_eq!(rep2["deleted"], 3, "三类都应完成本地软删");
         assert_eq!(rep2["cloud"]["deleted"], 0);
+        assert_eq!(
+            rep2["cloud"]["removed"], 0,
+            "真删数（200）与 alreadyGone（404）必须分开报，否则事后无法自证删成功"
+        );
+        assert_eq!(rep2["cloud"]["alreadyGone"], 0);
         assert_eq!(rep2["cloud"]["failed"], 0, "无 token 不算失败，本地不被卡住");
         assert_eq!(rep2["cloud"]["noToken"], 1, "own_a：归属对但没凭证");
         assert_eq!(rep2["cloud"]["foreign"], 1, "foreign_a：云端归别的账号，不碰");

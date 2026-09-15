@@ -164,8 +164,18 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone }: Pro
       }
       const sc = res.alignData?.slim?.cloud;
       if (sc?.enabled) {
-        if (sc.deleted) parts.push(`云端也清了 ${sc.deleted} 条`);
+        const removed = sc.removed ?? 0;
+        const gone = sc.alreadyGone ?? 0;
+        const total = sc.deleted ?? removed + gone;
+        if (total) {
+          parts.push(
+            gone
+              ? `云端清了 ${total} 条（真删 ${removed} 条，${gone} 条云端本来就没留）`
+              : `云端真删掉 ${removed || total} 条`,
+          );
+        }
         if (sc.failed) parts.push(`有 ${sc.failed} 条云端没删掉，本地先留着，下次切号再试`);
+        if (sc.foreign) parts.push(`有 ${sc.foreign} 条云端归别的账号，没碰`);
       }
       if (res.backup) parts.push(`备份: ${res.backup}`);
       toast.success(`已切换至「${nickname}」`, {

@@ -179,11 +179,22 @@ export function formatAlignReport(r: AlignDataReport): string[] {
       } else if (r.dryRun) {
         lines.push(`　云端也会一起清：约 ${cl.planned ?? 0} 条（只动云端就归本账号的）`);
       } else {
-        lines.push(
-          `　云端已清 ${cl.deleted ?? 0} 条` +
-            (cl.failed ? `，另有 ${cl.failed} 条没删掉（本地先留着，下次切号再试）` : "") +
-            (cl.foreign ? `；${cl.foreign} 条云端归别的账号，没碰` : ""),
-        );
+        const removed = cl.removed ?? 0;
+        const gone = cl.alreadyGone ?? 0;
+        const total = cl.deleted ?? removed + gone;
+        const parts: string[] = [];
+        if (total > 0) {
+          parts.push(
+            gone > 0
+              ? `云端清了 ${total} 条（真删 ${removed} 条，另有 ${gone} 条云端本来就没留）`
+              : `云端真删掉 ${removed || total} 条`,
+          );
+        }
+        if (cl.noToken) parts.push(`${cl.noToken} 条没读到登录凭证，只在本机收拾了`);
+        if (cl.failed) parts.push(`${cl.failed} 条云端没删掉，本机先留着，下次切号再试`);
+        if (cl.foreign) parts.push(`${cl.foreign} 条云端归别的账号，没碰`);
+        if (parts.length) lines.push(`　${parts.join("；")}`);
+        else lines.push("　云端这轮没有要清的");
       }
     }
   }

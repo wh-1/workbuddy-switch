@@ -169,8 +169,12 @@ export interface AlignDataReport {
       tokenReady: boolean;
       /** 仅预览：将向云端发几条删除请求。 */
       planned?: number;
-      /** 云端已删（含「云端本来就没有」）。 */
+      /** 云端删除请求的**合计**（= `removed` + `alreadyGone`）。 */
       deleted?: number;
+      /** 其中的「真被这次请求删掉」数（HTTP 200）——只有它证明删成功。 */
+      removed?: number;
+      /** 其中的「云端本来就没有」数（HTTP 404）——归属已校验，视为干净。 */
+      alreadyGone?: number;
       /** 云端说这条不归本次账号（映射记错）→ 已放弃云端、只本地软删。 */
       forbidden?: number;
       /** 云端删除失败 → **本地保留未删**，下次切号再试。 */
@@ -181,6 +185,8 @@ export interface AlignDataReport {
       noMapping?: number;
       /** 映射显示云端归别的账号 → 只本地软删（不碰别人的对话）。 */
       foreign?: number;
+      /** 归属对得上但没取到凭证 → 云端整轮跳过，只本地软删。 */
+      noToken?: number;
     };
     /**
      * 仅预览：本次将复制的会话对瘦身的抵消。
