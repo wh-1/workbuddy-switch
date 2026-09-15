@@ -47,9 +47,6 @@ pub struct SwitchOptions {
     /// 会话瘦身：每项目保留最近 N 条存活会话（0 = 关闭）。
     #[serde(default)]
     pub slim_keep: i64,
-    /// 会话瘦身时连带删除云端副本（默认关；不可逆，需显式开启）。
-    #[serde(default)]
-    pub slim_delete_cloud: bool,
     /// 预览模式：只统计变更，不落盘。
     #[serde(default)]
     pub dry_run: bool,
@@ -70,7 +67,6 @@ impl Default for SwitchOptions {
             align_files: false,
             sync_projects: false,
             slim_keep: 0,
-            slim_delete_cloud: false,
             dry_run: false,
         }
     }
@@ -97,7 +93,6 @@ pub fn switch_account(
         "alignFiles": opts.align_files,
         "syncProjects": opts.sync_projects,
         "slimKeep": opts.slim_keep,
-        "slimDeleteCloud": opts.slim_delete_cloud,
         "restart": opts.restart,
     });
     match &outcome {
@@ -162,7 +157,6 @@ fn switch_account_inner(
             align_files: opts.align_files,
             sync_projects: opts.sync_projects,
             slim_keep: opts.slim_keep,
-            slim_delete_cloud: opts.slim_delete_cloud,
             dry_run: true,
         };
         // 预览不真复制，但把「将要复制的会话」传进去，用于量化瘦身的抵消条数。
@@ -198,7 +192,6 @@ fn switch_account_inner(
             align_files: opts.align_files,
             sync_projects: opts.sync_projects,
             slim_keep: opts.slim_keep,
-            slim_delete_cloud: opts.slim_delete_cloud,
             dry_run: false,
         }, &protected);
         if align_report.is_some() {

@@ -581,39 +581,25 @@ pub fn sync_project_set(src_uid: &str, dst_uid: &str, dry_run: bool, force: bool
 }
 
 /// 真实路径包装：会话瘦身（含 db 备份）。`exclude` = 不参与瘦身的会话 id（本次复制体）。
+///
+/// 云端删除是瘦身的默认组成部分（不再单独设开关）：装配云端上下文——读映射表 +
+/// 取该账号 token；任何一步缺失都不致命，会在报告的 `slim.cloud.tokenReady` 里
+/// 如实反映，流程退化为「只本地瘦身」。删除按 `cloud_conv` 的三条铁律走。
 pub fn slim_sessions(
     uid: &str,
     keep: i64,
     dry_run: bool,
     exclude: &[String],
 ) -> Result<Value, String> {
-    slim_sessions_with_cloud(uid, keep, dry_run, exclude, false)
-}
-
-/// 同上，但可选「连带删云端」（`delete_cloud=true` 时按 `cloud_conv` 的三条铁律走）。
-///
-/// 云端上下文在这里装配：读映射表 + 取该账号 token；任何一步缺失都不致命，
-/// 会在报告的 `slim.cloud.tokenReady` 里如实反映，流程退化为「只本地瘦身」。
-pub fn slim_sessions_with_cloud(
-    uid: &str,
-    keep: i64,
-    dry_run: bool,
-    exclude: &[String],
-    delete_cloud: bool,
-) -> Result<Value, String> {
     if !dry_run {
         let root = backup_dir().join("projects_anchor").join(backup_stamp());
         backup_workbuddy_db(&root);
     }
-    let ctx = if delete_cloud {
-        Some(SlimCloudCtx {
-            uid: uid.to_string(),
-            token: crate::modules::cloud_conv::token_of(uid),
-            channels: crate::modules::cloud_conv::mapping_channels(),
-        })
-    } else {
-        None
-    };
+    let ctx = Some(SlimCloudCtx {
+        uid: uid.to_string(),
+        token: crate::modules::cloud_conv::token_of(uid),
+        channels: crate::modules::cloud_conv::mapping_channels(),
+    });
     slim_sessions_in_db_cloud(
         &workbuddy_db_path(),
         uid,

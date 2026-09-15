@@ -10,8 +10,6 @@ export interface AlignOptions {
   syncProjects: boolean;
   /** 会话瘦身：每项目保留最近 1 条（默认开）。 */
   slimSessions: boolean;
-  /** 瘦身时连带删云端（默认关）。 */
-  slimDeleteCloud: boolean;
 }
 
 interface Props {
@@ -69,20 +67,9 @@ export function AlignOptionsPanel({ value, onChange, previewLines }: Props) {
 
       <Row
         title="会话瘦身"
-        hint="每个项目只保留最近 1 条对话，其余软删（JSONL 保留，Token 统计不受影响）"
+        hint="每个项目只保留最近 1 条对话，其余软删（JSONL 保留，Token 统计不受影响）；云端那份也一起清掉——只动『云端就归这次要切的账号』的对话，别人的不碰；云端没删掉就不动本地，下次切号再来一次"
         checked={value.slimSessions}
         onCheckedChange={(v) => onChange({ ...value, slimSessions: v })}
-      />
-
-      <Row
-        title="云端也一起收拾"
-        hint={
-          value.slimSessions
-            ? "瘦身时顺手把云端那份也删掉 —— 不然手机上还看得见、本机又已经找不到入口。只动『云端就归这次要切的账号』的对话，别人的不碰；云端没删掉就不动本地，下次切号再来一次。"
-            : "先勾上「会话瘦身」，这一项才有活干。"
-        }
-        checked={value.slimDeleteCloud}
-        onCheckedChange={(v) => onChange({ ...value, slimDeleteCloud: v })}
       />
 
       {previewLines && (

@@ -59,11 +59,7 @@ pub struct AlignOptions {
     pub sync_projects: bool,
     /// 会话瘦身：每项目保留最近 N 条存活会话（0 或缺省 = 关闭）。
     pub slim_keep: i64,
-    /// 会话瘦身时**连带删除云端副本**（默认关；云端删除不可逆，必须显式开启）。
-    ///
-    /// 生效前提：`slim_keep > 0`，且该会话的云端归属账号 == 本次瘦身目标账号
-    /// （判据见 `cloud_conv`）。云端删除失败时**本地保留不删**，留待下次切号重试。
-    pub slim_delete_cloud: bool,
+    /// 预览模式：只统计变更，不落盘。
     pub dry_run: bool,
 }
 
@@ -689,12 +685,11 @@ fn append_project_and_slim(
         }
     }
     if opts.slim_keep > 0 {
-        match crate::modules::projects_anchor::slim_sessions_with_cloud(
+        match crate::modules::projects_anchor::slim_sessions(
             target_uid,
             opts.slim_keep,
             opts.dry_run,
             protected_ids,
-            opts.slim_delete_cloud,
         ) {
             Ok(r) => report["slim"] = r,
             Err(e) => report["slim"] = json!({ "error": e }),

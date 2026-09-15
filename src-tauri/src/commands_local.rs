@@ -51,7 +51,6 @@ pub async fn align_data(
     align_files: Option<bool>,
     sync_projects: Option<bool>,
     slim_keep: Option<i64>,
-    slim_delete_cloud: Option<bool>,
     dry_run: Option<bool>,
 ) -> Result<Value, String> {
     if account_id.trim().is_empty() {
@@ -63,7 +62,6 @@ pub async fn align_data(
         align_files: align_files.unwrap_or(false),
         sync_projects: sync_projects.unwrap_or(false),
         slim_keep: slim_keep.unwrap_or(0),
-        slim_delete_cloud: slim_delete_cloud.unwrap_or(false),
         dry_run: dry_run.unwrap_or(false),
     };
     tauri::async_runtime::spawn_blocking(move || {

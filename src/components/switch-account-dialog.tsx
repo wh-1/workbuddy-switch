@@ -39,7 +39,6 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone }: Pro
   const [alignFiles, setAlignFiles] = useState(true);
   const [syncProjects, setSyncProjects] = useState(true);
   const [slimSessions, setSlimSessions] = useState(true);
-  const [slimDeleteCloud, setSlimDeleteCloud] = useState(false);
   const [previewLines, setPreviewLines] = useState<string[] | null>(null);
   const [previewing, setPreviewing] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -78,7 +77,6 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone }: Pro
       setAlignAutomations(true);
       setAlignSessions(false);
       setAlignFiles(true);
-      setSlimDeleteCloud(false);
       setPreviewLines(null);
       setSelected(new Set());
       setExpanded(new Set());
@@ -137,7 +135,6 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone }: Pro
         alignFiles: alignFiles,
         syncProjects: syncProjects,
         slimKeep: slimSessions ? 1 : 0,
-        slimDeleteCloud: slimSessions && slimDeleteCloud,
       });
       const nickname = account.nickname || account.email || account.uid || "该账号";
       const parts: string[] = [];
@@ -205,7 +202,6 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone }: Pro
         alignFiles: alignFiles,
         syncProjects: syncProjects,
         slimKeep: slimSessions ? 1 : 0,
-        slimDeleteCloud: slimSessions && slimDeleteCloud,
         dryRun: true,
       });
       setPreviewLines(res.alignData ? formatAlignReport(res.alignData) : ["无对齐数据"]);
@@ -323,14 +319,13 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone }: Pro
           </div>
 
           <AlignOptionsPanel
-            value={{ alignAutomations, alignSessions, alignFiles, syncProjects, slimSessions, slimDeleteCloud }}
+            value={{ alignAutomations, alignSessions, alignFiles, syncProjects, slimSessions }}
             onChange={(next) => {
               setAlignAutomations(next.alignAutomations);
               setAlignSessions(next.alignSessions);
               setAlignFiles(next.alignFiles);
               setSyncProjects(next.syncProjects);
               setSlimSessions(next.slimSessions);
-              setSlimDeleteCloud(next.slimDeleteCloud);
             }}
             previewLines={previewLines}
           />
