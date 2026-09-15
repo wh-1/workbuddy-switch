@@ -187,6 +187,21 @@ export interface AlignDataReport {
       foreign?: number;
       /** 归属对得上但没取到凭证 → 云端整轮跳过，只本地软删。 */
       noToken?: number;
+      /** 对账阶段：映射行全集 × 本机 sessions，清「本机已删但云端还在」的残留。 */
+      reconcile?: {
+        /** 本机映射行总数。 */
+        mapped?: number;
+        /** 本机已软删、云端待清的条数（dry-run 为将清数，真删为处理数）。 */
+        planned?: number;
+        removed?: number;
+        alreadyGone?: number;
+        failed?: number;
+        /** 映射行有、本机无行——可能是其他设备的活会话，只计数不删。 */
+        unknown?: number;
+        /** 映射库缺失 → 对账跳过。 */
+        skipped?: string;
+        error?: string;
+      };
     };
     /**
      * 仅预览：本次将复制的会话对瘦身的抵消。

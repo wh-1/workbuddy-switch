@@ -183,6 +183,15 @@ export function formatAlignReport(r: AlignDataReport): string[] {
         if (parts.length) lines.push(`　${parts.join("；")}`);
         else lines.push("　云端这轮没有要清的");
       }
+      const rc = cl.reconcile;
+      if (rc && !rc.error && !rc.skipped) {
+        const unknownNote = rc.unknown ? `，另有 ${rc.unknown} 条本机没痕迹（可能是别的设备的，没动）` : "";
+        lines.push(
+          r.dryRun
+            ? `　云端对账：扫了 ${rc.mapped ?? 0} 条云同步记录，${rc.planned ?? 0} 条本机已删的云端残留待清${unknownNote}`
+            : `　云端对账：扫了 ${rc.mapped ?? 0} 条，清理 ${rc.planned ?? 0} 条残留（真删 ${rc.removed ?? 0}，云端本来就没 ${rc.alreadyGone ?? 0}）${rc.failed ? `，${rc.failed} 条没删掉下次再试` : ""}${unknownNote}`,
+        );
+      }
     }
   }
   lines.push(r.dryRun ? "以上为预览结果，尚未落盘" : "对齐完成（已先备份 db 与 settings）");

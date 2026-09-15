@@ -143,6 +143,44 @@ pub fn mapping_channels() -> HashMap<String, String> {
     mapping_channels_from(&db)
 }
 
+/// 映射行全量（含 conversation_id——删除接口的唯一钥匙）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MappingEntry {
+    pub session_id: String,
+    pub conversation_id: String,
+    pub channel: String,
+}
+
+/// 读映射表全量行（只读，绝不写删——坑位 41）。空表 = 无法对账，调用方跳过该阶段。
+pub fn mapping_rows() -> Vec<MappingEntry> {
+    let Some(db) = latest_mapping_db() else {
+        return Vec::new();
+    };
+    mapping_rows_from(&db)
+}
+
+/// 供测试注入路径用。
+pub fn mapping_rows_from(db: &std::path::Path) -> Vec<MappingEntry> {
+    let Ok(conn) = Connection::open(db) else {
+        return Vec::new();
+    };
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT session_id, conversation_id, COALESCE(msg_channel, '') FROM edge_sync_mapping",
+    ) else {
+        return Vec::new();
+    };
+    let Ok(rows) = stmt.query_map([], |r| {
+        Ok(MappingEntry {
+            session_id: r.get(0)?,
+            conversation_id: r.get(1)?,
+            channel: r.get(2)?,
+        })
+    }) else {
+        return Vec::new();
+    };
+    rows.flatten().collect()
+}
+
 /// 供测试注入路径用。
 pub fn mapping_channels_from(db: &std::path::Path) -> HashMap<String, String> {
     let Ok(conn) = Connection::open(db) else {

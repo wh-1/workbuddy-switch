@@ -585,6 +585,10 @@ pub fn sync_project_set(src_uid: &str, dst_uid: &str, dry_run: bool, force: bool
 /// 云端删除是瘦身的默认组成部分（不再单独设开关）：装配云端上下文——读映射表 +
 /// 取该账号 token；任何一步缺失都不致命，会在报告的 `slim.cloud.tokenReady` 里
 /// 如实反映，流程退化为「只本地瘦身」。删除按 `cloud_conv` 的三条铁律走。
+///
+/// 末尾追加**对账阶段**（`cloud.reconcile`）：映射行全集 × 本机 sessions，
+/// 清「本机已软删但云端还在」的残留；映射行有、本机无行的 Unknown 只计数不删
+/// （可能是其他设备的活会话）。映射库只读，绝不写删。
 pub fn slim_sessions(
     uid: &str,
     keep: i64,
@@ -600,14 +604,71 @@ pub fn slim_sessions(
         token: crate::modules::cloud_conv::token_of(uid),
         channels: crate::modules::cloud_conv::mapping_channels(),
     });
-    slim_sessions_in_db_cloud(
+    let mut report = slim_sessions_in_db_cloud(
         &workbuddy_db_path(),
         uid,
         keep,
         dry_run,
         exclude,
         ctx.as_ref(),
+    )?;
+    if let Some(cloud) = report.get_mut("cloud") {
+        cloud["reconcile"] = reconcile_cloud_stage(uid, dry_run);
+    }
+    Ok(report)
+}
+
+/// 对账阶段：映射行全集 × 本机 sessions → 清「本机已软删但云端还在」。
+/// 任何一步失败都不致命（返回 error 对象，不影响瘦身主流程）。
+fn reconcile_cloud_stage(uid: &str, dry_run: bool) -> Value {
+    let rows = crate::modules::cloud_conv::mapping_rows();
+    if rows.is_empty() {
+        return json!({ "skipped": "no mapping db" });
+    }
+    let (alive, deleted) = match read_local_alive_deleted(&workbuddy_db_path()) {
+        Ok(v) => v,
+        Err(e) => return json!({ "error": e }),
+    };
+    let token = crate::modules::cloud_conv::token_of(uid);
+    crate::modules::cloud_reconcile::sweep_stale_mappings(
+        &rows,
+        &alive,
+        &deleted,
+        token.as_deref(),
+        dry_run,
+        crate::modules::cloud_conv::delete_conversation,
     )
+}
+
+/// 读本机 sessions 的存活/软删 id 集合（对账用，只读）。
+fn read_local_alive_deleted(
+    db: &std::path::Path,
+) -> Result<(std::collections::HashSet<String>, std::collections::HashSet<String>), String> {
+    use std::collections::HashSet;
+    let conn = rusqlite::Connection::open_with_flags(
+        db,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .map_err(|e| format!("打开 workbuddy.db 失败: {e}"))?;
+    let mut alive = HashSet::new();
+    let mut deleted = HashSet::new();
+    let mut stmt = conn
+        .prepare("SELECT id, deleted_at FROM sessions")
+        .map_err(|e| format!("查询 sessions 失败: {e}"))?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?))
+        })
+        .map_err(|e| format!("查询 sessions 失败: {e}"))?;
+    for row in rows {
+        let (id, deleted_at) = row.map_err(|e| format!("读取 sessions 行失败: {e}"))?;
+        if deleted_at.is_none() {
+            alive.insert(id);
+        } else {
+            deleted.insert(id);
+        }
+    }
+    Ok((alive, deleted))
 }
 
 #[cfg(test)]
