@@ -214,8 +214,12 @@ export interface AlignDataReport {
         stale?: number;
         /** 云端有 + 本机无痕迹 —— 别的设备的活会话，只报不删。 */
         foreign?: number;
-        /** 本机有 + 云端无（还没上云）。 */
+        /** 本机有 + 云端无（合计 = localOnlyAlive + localOnlyDeleted）。 */
         localOnly?: number;
+        /** 本机**存活** + 云端无 —— 真·未上云的活会话，UI 显示这个。 */
+        localOnlyAlive?: number;
+        /** 本机已软删 + 云端也无 —— 已删干净的常态，不该当欠账报给用户。 */
+        localOnlyDeleted?: number;
         /** enabled=false 时的原因（noToken / 网络错误）。 */
         reason?: string;
       };

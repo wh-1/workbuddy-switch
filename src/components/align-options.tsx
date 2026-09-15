@@ -201,7 +201,10 @@ export function formatAlignReport(r: AlignDataReport): string[] {
         lines.push(
           `　云端全账：这个账号名下一共 ${inv.cloud ?? 0} 条会话，${inv.aligned ?? 0} 条跟你这边对得上` +
             (extra ? `，${extra}` : "") +
-            (inv.localOnly ? `；本机另有 ${inv.localOnly} 条还没上云` : ""),
+            // 只报「活会话未上云」：软删且云端也无是常态，混进来会让数字虚高 100+
+            (inv.localOnlyAlive
+              ? `；本机另有 ${inv.localOnlyAlive} 条活会话还没上云`
+              : ""),
         );
       }
     }

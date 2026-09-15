@@ -15,12 +15,16 @@ use serde_json::{json, Value};
 use super::cloud_conv::CloudDelete;
 
 /// 对账结果。`victims` 只含 `CloudOnly`；`unknown` 仅报告不动作。
+///
+/// 本机独有拆两类（2026-09-16）：`ignored_alive` = 活会话未上云（值得看）
+/// / `ignored_deleted` = 已软删且云端也无（**正常态**，不该报给用户当"欠账"）。
 #[derive(Debug, Default, PartialEq)]
 pub struct ReconcileReport {
     pub aligned: Vec<String>,
     pub cloud_only: Vec<String>,
     pub unknown: Vec<String>,
-    pub ignored_local_only: usize,
+    pub ignored_alive: usize,
+    pub ignored_deleted: usize,
 }
 
 /// 纯对账：不联网、不落盘。
@@ -39,9 +43,13 @@ pub fn reconcile(
             r.unknown.push(sid.clone());
         }
     }
-    r.ignored_local_only = local_alive
+    // 本机独有按「存活 / 已软删」分列：前者是真·未上云，后者是已删干净的常态
+    r.ignored_alive = local_alive
         .iter()
-        .chain(local_deleted.iter())
+        .filter(|s| !cloud_sids.contains(s))
+        .count();
+    r.ignored_deleted = local_deleted
+        .iter()
         .filter(|s| !cloud_sids.contains(s))
         .count();
     r
@@ -149,7 +157,10 @@ where
         "aligned": r.aligned.len(),
         "stale": r.cloud_only.len(),
         "foreign": r.unknown.len(),
-        "localOnly": r.ignored_local_only,
+        // localOnly 保留为合计（旧报告/消费者兼容），细分看后两列
+        "localOnly": r.ignored_alive + r.ignored_deleted,
+        "localOnlyAlive": r.ignored_alive,
+        "localOnlyDeleted": r.ignored_deleted,
     })
 }
 
@@ -178,7 +189,8 @@ mod tests {
         assert_eq!(r.aligned, vec!["c1".to_string(), "c5".to_string()]);
         assert_eq!(r.cloud_only, vec!["c2".to_string(), "c4".to_string()]);
         assert_eq!(r.unknown, vec!["c3".to_string()]);
-        assert_eq!(r.ignored_local_only, 2, "l1/l2 云端没有 → 本机事务");
+        assert_eq!(r.ignored_alive, 1, "l1 存活且云端无 → 真·未上云");
+        assert_eq!(r.ignored_deleted, 1, "l2 已软删且云端无 → 已删干净的常态");
         // 红线语义：unknown 绝不混进 victims
         assert!(!r.cloud_only.contains(&"c3".to_string()));
     }
@@ -187,7 +199,8 @@ mod tests {
     fn reconcile_empty_cloud_is_noop() {
         let r = reconcile(&[], &set(&["c1"]), &set(&["c2"]));
         assert!(r.aligned.is_empty() && r.cloud_only.is_empty() && r.unknown.is_empty());
-        assert_eq!(r.ignored_local_only, 2);
+        assert_eq!(r.ignored_alive, 1);
+        assert_eq!(r.ignored_deleted, 1);
     }
 
     #[test]
@@ -293,7 +306,9 @@ mod tests {
         assert_eq!(r["aligned"], 2);
         assert_eq!(r["stale"], 1);
         assert_eq!(r["foreign"], 1, "c3 是本机无痕迹的他机会话");
-        assert_eq!(r["localOnly"], 1, "l1 未上云");
+        assert_eq!(r["localOnly"], 1, "l1 未上云（合计口径保持向后兼容）");
+        assert_eq!(r["localOnlyAlive"], 1, "l1 活会话未上云");
+        assert_eq!(r["localOnlyDeleted"], 0, "c2 已软删但云端还在 → 归 stale 不归这里");
     }
 
     #[test]
