@@ -287,6 +287,8 @@ export function switchAccount(args: {
   alignFiles?: boolean;
   syncProjects?: boolean;
   slimKeep?: number;
+  /** 会话瘦身时连带删云端（默认关）。 */
+  slimDeleteCloud?: boolean;
   dryRun?: boolean;
 }): Promise<SwitchResult> {
   return call("switch_account", args as unknown as Record<string, unknown>);
@@ -305,6 +307,8 @@ export function alignData(args: {
   alignFiles?: boolean;
   syncProjects?: boolean;
   slimKeep?: number;
+  /** 会话瘦身时连带删云端（默认关）。 */
+  slimDeleteCloud?: boolean;
   dryRun?: boolean;
 }): Promise<AlignDataReport> {
   return call("align_data", args as unknown as Record<string, unknown>);

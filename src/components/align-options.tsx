@@ -10,6 +10,8 @@ export interface AlignOptions {
   syncProjects: boolean;
   /** 会话瘦身：每项目保留最近 1 条（默认开）。 */
   slimSessions: boolean;
+  /** 瘦身时连带删云端（默认关）。 */
+  slimDeleteCloud: boolean;
 }
 
 interface Props {
@@ -70,6 +72,17 @@ export function AlignOptionsPanel({ value, onChange, previewLines }: Props) {
         hint="每个项目只保留最近 1 条对话，其余软删（JSONL 保留，Token 统计不受影响）"
         checked={value.slimSessions}
         onCheckedChange={(v) => onChange({ ...value, slimSessions: v })}
+      />
+
+      <Row
+        title="云端也一起收拾"
+        hint={
+          value.slimSessions
+            ? "瘦身时顺手把云端那份也删掉 —— 不然手机上还看得见、本机又已经找不到入口。只动『云端就归这次要切的账号』的对话，别人的不碰；云端没删掉就不动本地，下次切号再来一次。"
+            : "先勾上「会话瘦身」，这一项才有活干。"
+        }
+        checked={value.slimDeleteCloud}
+        onCheckedChange={(v) => onChange({ ...value, slimDeleteCloud: v })}
       />
 
       {previewLines && (
@@ -158,6 +171,20 @@ export function formatAlignReport(r: AlignDataReport): string[] {
           ? `　实际执行时本次复制的 ${cp.total} 条会被跳过，其中 ${cp.hitCount} 条落在上述 ${cp.hitProjects} 个瘦身项目，实际删除数更少`
           : "　实际执行时本次复制的对话会被跳过，删除数可能更少",
       );
+    }
+    const cl = r.slim.cloud;
+    if (cl?.enabled) {
+      if (!cl.tokenReady) {
+        lines.push("　云端这轮先跳过：没读到该账号的登录凭证，只做本地瘦身");
+      } else if (r.dryRun) {
+        lines.push(`　云端也会一起清：约 ${cl.planned ?? 0} 条（只动云端就归本账号的）`);
+      } else {
+        lines.push(
+          `　云端已清 ${cl.deleted ?? 0} 条` +
+            (cl.failed ? `，另有 ${cl.failed} 条没删掉（本地先留着，下次切号再试）` : "") +
+            (cl.foreign ? `；${cl.foreign} 条云端归别的账号，没碰` : ""),
+        );
+      }
     }
   }
   lines.push(r.dryRun ? "以上为预览结果，尚未落盘" : "对齐完成（已先备份 db 与 settings）");

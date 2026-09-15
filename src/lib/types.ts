@@ -162,6 +162,26 @@ export interface AlignDataReport {
     excluded?: number;
     /** 每个项目将被删除的条数。 */
     groups?: { cwd: string; count: number }[];
+    /** 云端连带删除的结果（仅勾了「云端一起瘦」时出现）。 */
+    cloud?: {
+      enabled: boolean;
+      /** 是否取到了该账号凭证；false 表示整个云端环节被跳过。 */
+      tokenReady: boolean;
+      /** 仅预览：将向云端发几条删除请求。 */
+      planned?: number;
+      /** 云端已删（含「云端本来就没有」）。 */
+      deleted?: number;
+      /** 云端说这条不归本次账号（映射记错）→ 已放弃云端、只本地软删。 */
+      forbidden?: number;
+      /** 云端删除失败 → **本地保留未删**，下次切号再试。 */
+      failed?: number;
+      keptLocal?: number;
+      samples?: string[];
+      /** 本机没有该会话的云端映射 → 只本地软删。 */
+      noMapping?: number;
+      /** 映射显示云端归别的账号 → 只本地软删（不碰别人的对话）。 */
+      foreign?: number;
+    };
     /**
      * 仅预览：本次将复制的会话对瘦身的抵消。
      * 预览不真复制，复制体拿不到新 id、进不了保护名单，`planned` 偏大，故给此量化提示。

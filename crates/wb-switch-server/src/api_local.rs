@@ -114,6 +114,10 @@ async fn api_align_data(Json(body): Json<Value>) -> Response {
             .get("slimKeep")
             .and_then(|v| v.as_i64())
             .unwrap_or(0),
+        slim_delete_cloud: body
+            .get("slimDeleteCloud")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
         dry_run: body
             .get("dryRun")
             .and_then(|v| v.as_bool())

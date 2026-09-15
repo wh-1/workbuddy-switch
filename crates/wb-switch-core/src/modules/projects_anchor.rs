@@ -310,12 +310,59 @@ pub(crate) fn sync_project_set_in_db(
 ///
 /// `exclude` = 本次切号刚复制过来的会话 id —— 它们既不被删、也不占用保留名额，
 /// 否则「复制多条同项目会话 + 瘦身 keep=1」会让用户只看到 1 条（复制体互相挤掉）。
+/// 云端删除上下文（`None` = 只做本地软删，保持旧行为）。
+///
+/// 归属判据 = `<configDir>/edge-sync-mapping-v4.db` 的 `msg_channel`；
+/// 只有 `convmsg:<uid>`（本次瘦身的目标账号）才动云端 —— 其余（无映射 / 归别的账号）
+/// 一律**只本地软删**，避免用错账号 token 触发 403 白跑、或误伤他人会话。
+pub struct SlimCloudCtx {
+    /// 本次瘦身的目标账号 uid。
+    pub uid: String,
+    /// 该账号的 `access_token`（取不到则整个云端环节跳过）。
+    pub token: Option<String>,
+    /// `sid → msg_channel` 全量映射。
+    pub channels: std::collections::HashMap<String, String>,
+}
+
+impl SlimCloudCtx {
+    /// 该 sid 是否「云端归属本次目标账号」⇒ 可以放心删云端。
+    fn owns(&self, sid: &str) -> bool {
+        self.channels
+            .get(sid)
+            .map(|ch| crate::modules::cloud_conv::channel_uid(ch) == self.uid)
+            .unwrap_or(false)
+    }
+}
+
+/// 会话瘦身的本地实现（不含云端）。旧签名保留，供既有调用与测试使用。
+#[allow(dead_code)] // 仅测试与旧调用点用；生产路径统一走 _cloud 版
 pub(crate) fn slim_sessions_in_db(
     db_path: &Path,
     uid: &str,
     keep: i64,
     dry_run: bool,
     exclude: &[String],
+) -> Result<Value, String> {
+    slim_sessions_in_db_cloud(db_path, uid, keep, dry_run, exclude, None)
+}
+
+/// 会话瘦身（可带云端删除）。
+///
+/// 每条 victim 的处理顺序（**先云端、后本地**，保证失败可回退）：
+///   `ch == convmsg:<uid>` 且有 token → 调云端删除
+///        · 成功 / 404  → 本地软删，计 `cloudDeleted`
+///        · 403         → 归属与映射不符（映射记错）⇒ **放弃云端**，本地照常软删，计 `cloudForbidden`
+///        · 其它失败    → **本地不软删**（留到下次重试），计 `cloudFailed`
+///   `ch` 缺失                                    → 本地软删，计 `cloudNoMapping`
+///   `ch` 归别的账号                              → 本地软删，计 `cloudForeign`
+/// dry_run 只统计「将调用云端几条」，不发起请求。
+pub(crate) fn slim_sessions_in_db_cloud(
+    db_path: &Path,
+    uid: &str,
+    keep: i64,
+    dry_run: bool,
+    exclude: &[String],
+    cloud: Option<&SlimCloudCtx>,
 ) -> Result<Value, String> {
     let keep = keep.max(1);
     let Some(conn) = open_db(db_path, false) else {
@@ -366,8 +413,54 @@ pub(crate) fn slim_sessions_in_db(
     };
 
     let mut deleted = 0usize;
-    if !dry_run && !victims.is_empty() {
-        for (id, _cwd) in &victims {
+    // 云端侧统计
+    let mut cloud_deleted = 0usize;
+    let mut cloud_forbidden = 0usize;
+    let mut cloud_failed = 0usize;
+    let mut cloud_no_mapping = 0usize;
+    let mut cloud_no_token = 0usize;
+    let mut cloud_foreign = 0usize;
+    let mut cloud_planned = 0usize; // dry_run 下「将调用云端」条数
+    let mut cloud_kept: Vec<String> = Vec::new(); // 因云端失败而保留未删的 sid
+
+    let want_cloud = cloud.is_some();
+    // 云端开启但没有 token ⇒ 退化为「只本地」，避免误报为 foreign
+    let cloud_token_ok = cloud.map(|c| c.token.is_some()).unwrap_or(false);
+
+    for (id, _cwd) in &victims {
+        let mut allow_local = true;
+        if want_cloud {
+            let c = cloud.expect("checked by want_cloud");
+            if c.owns(id) {
+                if !cloud_token_ok {
+                    // 归属对得上但没凭证 ⇒ 云端这轮跳过，本地照常软删
+                    cloud_no_token += 1;
+                } else if dry_run {
+                    cloud_planned += 1;
+                } else {
+                    let token = c.token.as_deref().unwrap_or("");
+                    match crate::modules::cloud_conv::delete_conversation(token, id) {
+                        crate::modules::cloud_conv::CloudDelete::Deleted => cloud_deleted += 1,
+                        crate::modules::cloud_conv::CloudDelete::AlreadyGone => cloud_deleted += 1,
+                        crate::modules::cloud_conv::CloudDelete::Forbidden => {
+                            cloud_forbidden += 1;
+                        }
+                        crate::modules::cloud_conv::CloudDelete::Failed(msg) => {
+                            cloud_failed += 1;
+                            cloud_kept.push(format!("{id}（{msg}）"));
+                            // 铁律 3：云端没删掉 ⇒ 本地保留，下次切号再试
+                            allow_local = false;
+                        }
+                    }
+                }
+            } else if c.channels.contains_key(id.as_str()) {
+                cloud_foreign += 1;
+            } else {
+                cloud_no_mapping += 1;
+            }
+        }
+
+        if !dry_run && allow_local {
             let n = conn
                 .execute(
                     "UPDATE sessions SET deleted_at = ?2 WHERE id = ?1 AND deleted_at IS NULL",
@@ -382,7 +475,7 @@ pub(crate) fn slim_sessions_in_db(
     for (_id, cwd) in &victims {
         *groups.entry(cwd.as_str()).or_insert(0) += 1;
     }
-    Ok(json!({
+    let mut report = json!({
         "uid": uid,
         "keep": keep,
         "excluded": excl.len(),
@@ -390,7 +483,23 @@ pub(crate) fn slim_sessions_in_db(
         "deleted": deleted,
         "groups": groups.iter().map(|(c, n)| json!({ "cwd": c, "count": n })).collect::<Vec<_>>(),
         "dryRun": dry_run,
-    }))
+    });
+    if want_cloud {
+        report["cloud"] = json!({
+            "enabled": true,
+            "tokenReady": cloud_token_ok,
+            "planned": cloud_planned,
+            "deleted": cloud_deleted,
+            "forbidden": cloud_forbidden,
+            "failed": cloud_failed,
+            "keptLocal": cloud_kept.len(),
+            "samples": cloud_kept.iter().take(5).cloned().collect::<Vec<_>>(),
+            "noMapping": cloud_no_mapping,
+            "noToken": cloud_no_token,
+            "foreign": cloud_foreign,
+        });
+    }
+    Ok(report)
 }
 
 /// 备份目录时间戳：毫秒级。
@@ -425,11 +534,41 @@ pub fn slim_sessions(
     dry_run: bool,
     exclude: &[String],
 ) -> Result<Value, String> {
+    slim_sessions_with_cloud(uid, keep, dry_run, exclude, false)
+}
+
+/// 同上，但可选「连带删云端」（`delete_cloud=true` 时按 `cloud_conv` 的三条铁律走）。
+///
+/// 云端上下文在这里装配：读映射表 + 取该账号 token；任何一步缺失都不致命，
+/// 会在报告的 `slim.cloud.tokenReady` 里如实反映，流程退化为「只本地瘦身」。
+pub fn slim_sessions_with_cloud(
+    uid: &str,
+    keep: i64,
+    dry_run: bool,
+    exclude: &[String],
+    delete_cloud: bool,
+) -> Result<Value, String> {
     if !dry_run {
         let root = backup_dir().join("projects_anchor").join(backup_stamp());
         backup_workbuddy_db(&root);
     }
-    slim_sessions_in_db(&workbuddy_db_path(), uid, keep, dry_run, exclude)
+    let ctx = if delete_cloud {
+        Some(SlimCloudCtx {
+            uid: uid.to_string(),
+            token: crate::modules::cloud_conv::token_of(uid),
+            channels: crate::modules::cloud_conv::mapping_channels(),
+        })
+    } else {
+        None
+    };
+    slim_sessions_in_db_cloud(
+        &workbuddy_db_path(),
+        uid,
+        keep,
+        dry_run,
+        exclude,
+        ctx.as_ref(),
+    )
 }
 
 #[cfg(test)]
@@ -592,6 +731,62 @@ mod tests {
             .query_row("SELECT id FROM sessions WHERE user_id='uid-a' AND cwd='D:\\p1' AND deleted_at IS NULL", [], |r| r.get(0))
             .unwrap();
         assert_eq!(kept, "s2", "保留 updated_at 最新的");
+    }
+
+    /// 云端连带删除的**归属分流**：无映射 / 归本账号（无 token）/ 归别的账号 三类必须分得清，
+    /// 且本用例**全程不联网**（token 传 `None` ⇒ 一律不发请求）。
+    #[test]
+    fn slim_cloud_routes_by_ownership_without_network() {
+        let db = temp_db("slim_cloud");
+        {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE sessions (
+                    id TEXT PRIMARY KEY, cwd TEXT, user_id TEXT, title TEXT,
+                    created_at INTEGER, updated_at INTEGER, deleted_at INTEGER);",
+            )
+            .unwrap();
+            // 每个 cwd 两条：旧的会被淘汰（keep=1 留最新）
+            for (cwd, pfx) in [("D:\\p9", "none"), ("D:\\p8", "own"), ("D:\\p7", "foreign")] {
+                for (suf, upd) in [("a", 100), ("b", 200)] {
+                    conn.execute(
+                        "INSERT INTO sessions (id, cwd, user_id, title, created_at, updated_at)
+                         VALUES (?1, ?2, 'uid-a', 't', 1, ?3)",
+                        rusqlite::params![format!("{pfx}_{suf}"), cwd, upd],
+                    )
+                    .unwrap();
+                }
+            }
+        }
+        // 只给 own_* 与 foreign_* 配映射；none_* 故意不配
+        let mut channels = std::collections::HashMap::new();
+        channels.insert("own_a".to_string(), "convmsg:uid-a".to_string());
+        channels.insert("foreign_a".to_string(), "convmsg:uid-b".to_string());
+        let ctx = SlimCloudCtx {
+            uid: "uid-a".into(),
+            token: None,
+            channels,
+        };
+
+        // ① dry-run：只统计「将调云端」条数，不落盘、不发请求
+        let rep = slim_sessions_in_db_cloud(&db, "uid-a", 1, true, &[], Some(&ctx)).unwrap();
+        assert_eq!(rep["planned"], 3, "三个 cwd 各淘汰 1 条");
+        assert_eq!(rep["deleted"], 0, "dry-run 不落盘");
+        assert_eq!(rep["cloud"]["enabled"], true);
+        assert_eq!(rep["cloud"]["tokenReady"], false);
+
+        // ② 真执行但无 token ⇒ 三类都只本地软删，一条云端请求都不发
+        let rep2 = slim_sessions_in_db_cloud(&db, "uid-a", 1, false, &[], Some(&ctx)).unwrap();
+        assert_eq!(rep2["deleted"], 3, "三类都应完成本地软删");
+        assert_eq!(rep2["cloud"]["deleted"], 0);
+        assert_eq!(rep2["cloud"]["failed"], 0, "无 token 不算失败，本地不被卡住");
+        assert_eq!(rep2["cloud"]["noToken"], 1, "own_a：归属对但没凭证");
+        assert_eq!(rep2["cloud"]["foreign"], 1, "foreign_a：云端归别的账号，不碰");
+        assert_eq!(rep2["cloud"]["noMapping"], 1, "none_a：本机没有映射");
+
+        // ③ 不勾云端 ⇒ 报告里根本没有 cloud 段（旧行为不变）
+        let rep3 = slim_sessions_in_db_cloud(&db, "uid-b", 1, true, &[], None).unwrap();
+        assert!(rep3.get("cloud").is_none(), "未开启时不应出现 cloud 字段");
     }
 
     /// 回归：「复制多条同项目会话 + 瘦身 keep=1」——复制体必须全部存活，且不挤掉原有保留名额。

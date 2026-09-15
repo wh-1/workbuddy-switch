@@ -2,6 +2,7 @@ pub mod account;
 pub mod align;
 pub mod auth_file;
 pub mod checkin;
+pub mod cloud_conv;
 pub mod codebuddy_cli;
 pub mod codebuddy_cn_ide;
 pub mod config;

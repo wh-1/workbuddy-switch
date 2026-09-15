@@ -39,6 +39,7 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone }: Pro
   const [alignFiles, setAlignFiles] = useState(true);
   const [syncProjects, setSyncProjects] = useState(true);
   const [slimSessions, setSlimSessions] = useState(true);
+  const [slimDeleteCloud, setSlimDeleteCloud] = useState(false);
   const [previewLines, setPreviewLines] = useState<string[] | null>(null);
   const [previewing, setPreviewing] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -77,6 +78,7 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone }: Pro
       setAlignAutomations(true);
       setAlignSessions(false);
       setAlignFiles(true);
+      setSlimDeleteCloud(false);
       setPreviewLines(null);
       setSelected(new Set());
       setExpanded(new Set());
@@ -135,6 +137,7 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone }: Pro
         alignFiles: alignFiles,
         syncProjects: syncProjects,
         slimKeep: slimSessions ? 1 : 0,
+        slimDeleteCloud: slimSessions && slimDeleteCloud,
       });
       const nickname = account.nickname || account.email || account.uid || "该账号";
       const parts: string[] = [];
@@ -158,6 +161,11 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone }: Pro
       }
       if (res.alignData?.slim?.deleted) {
         parts.push(`会话瘦身：已删 ${res.alignData.slim.deleted} 条`);
+      }
+      const sc = res.alignData?.slim?.cloud;
+      if (sc?.enabled) {
+        if (sc.deleted) parts.push(`云端也清了 ${sc.deleted} 条`);
+        if (sc.failed) parts.push(`有 ${sc.failed} 条云端没删掉，本地先留着，下次切号再试`);
       }
       if (res.backup) parts.push(`备份: ${res.backup}`);
       toast.success(`已切换至「${nickname}」`, {
@@ -187,6 +195,7 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone }: Pro
         alignFiles: alignFiles,
         syncProjects: syncProjects,
         slimKeep: slimSessions ? 1 : 0,
+        slimDeleteCloud: slimSessions && slimDeleteCloud,
         dryRun: true,
       });
       setPreviewLines(res.alignData ? formatAlignReport(res.alignData) : ["无对齐数据"]);
@@ -304,13 +313,14 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone }: Pro
           </div>
 
           <AlignOptionsPanel
-            value={{ alignAutomations, alignSessions, alignFiles, syncProjects, slimSessions }}
+            value={{ alignAutomations, alignSessions, alignFiles, syncProjects, slimSessions, slimDeleteCloud }}
             onChange={(next) => {
               setAlignAutomations(next.alignAutomations);
               setAlignSessions(next.alignSessions);
               setAlignFiles(next.alignFiles);
               setSyncProjects(next.syncProjects);
               setSlimSessions(next.slimSessions);
+              setSlimDeleteCloud(next.slimDeleteCloud);
             }}
             previewLines={previewLines}
           />
