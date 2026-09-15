@@ -96,6 +96,70 @@ pub fn delete_conversation(token: &str, sid: &str) -> CloudDelete {
 }
 
 /// 只对 id 里可能出现的字符做最小转义（sid 是 uuid，通常无需变）。
+/// 全账枚举端点（2026-09-15 实测：与 `CLOUD_BASE` **不同域**，是另一套网关）。
+///
+/// `GET {CLOUD_API_BASE}/v2/as/conversations/?type=all&page=N&size=M` + **归属账号** Bearer
+/// ⇒ 该账号名下**跨设备**全量会话（含他机创建与云端自动化）。
+/// ⚠️ 别把路径换到 `CLOUD_BASE` 的 `/console/as/conversations`：同 token 恒 403。
+pub const CLOUD_API_BASE: &str = "https://copilot.tencent.com";
+
+/// 列表页 size 上限（`size=200` 服务端直接 400）。
+pub const CLOUD_LIST_PAGE_SIZE: usize = 100;
+
+/// 解析一页列表响应 → (本页 sid 列表, 是否还有下一页)。纯函数，便于单测。
+pub fn parse_conversation_page(body: &str) -> Result<(Vec<String>, bool), String> {
+    let v: Value = serde_json::from_str(body).map_err(|e| format!("响应不是 JSON: {e}"))?;
+    let data = v.get("data").ok_or_else(|| "响应缺 data 字段".to_string())?;
+    let sids = data
+        .get("conversations")
+        .and_then(|c| c.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|c| c.get("id").and_then(|i| i.as_str()).map(str::to_string))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let has_next = data
+        .get("pagination")
+        .and_then(|p| p.get("hasNext"))
+        .and_then(|h| h.as_bool())
+        .unwrap_or(false);
+    Ok((sids, has_next))
+}
+
+/// 拉取账号全域会话 id（**只读**，自动分页）。
+///
+/// 失败一律 `Err` —— 调用方据此把全账巡检降级为「不启用」，**绝不影响瘦身主流程**。
+pub fn list_conversation_ids(token: &str) -> Result<Vec<String>, String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut page = 1usize;
+    loop {
+        let url = format!(
+            "{CLOUD_API_BASE}/v2/as/conversations/?type=all&page={page}&size={CLOUD_LIST_PAGE_SIZE}"
+        );
+        let resp = http()
+            .get(&url)
+            .bearer_auth(token)
+            .send()
+            .map_err(|e| format!("请求失败: {e}"))?;
+        let status = resp.status().as_u16();
+        let body = resp.text().unwrap_or_default();
+        if !(200..300).contains(&status) {
+            return Err(format!(
+                "http {status}: {}",
+                body.chars().take(120).collect::<String>()
+            ));
+        }
+        let (mut sids, has_next) = parse_conversation_page(&body)?;
+        out.append(&mut sids);
+        if !has_next || page >= 50 {
+            break;
+        }
+        page += 1;
+    }
+    Ok(out)
+}
+
 fn urlencode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
@@ -290,5 +354,28 @@ mod tests {
     fn mapping_channels_from_missing_db_is_empty() {
         let m = mapping_channels_from(std::path::Path::new("C:/__no_such_dir__/x.db"));
         assert!(m.is_empty());
+    }
+
+    #[test]
+    fn parse_conversation_page_reads_ids_and_hasnext() {
+        let body = r#"{"code":0,"msg":"OK","data":{"conversations":[{"id":"a"},{"id":"b"}],"total":2,"pagination":{"page":1,"size":100,"total":2,"totalPages":1,"hasNext":false,"hasPrev":false}}}"#;
+        let (sids, more) = parse_conversation_page(body).unwrap();
+        assert_eq!(sids, vec!["a".to_string(), "b".to_string()]);
+        assert!(!more);
+    }
+
+    #[test]
+    fn parse_conversation_page_hasnext_true() {
+        let body = r#"{"data":{"conversations":[],"pagination":{"hasNext":true}}}"#;
+        let (sids, more) = parse_conversation_page(body).unwrap();
+        assert!(sids.is_empty());
+        assert!(more);
+    }
+
+    #[test]
+    fn parse_conversation_page_rejects_non_json_and_missing_data() {
+        // 网关 403/401 会回 HTML 或 {"error":...}，必须当失败而不是当空列表
+        assert!(parse_conversation_page("<html>401 Authorization Required</html>").is_err());
+        assert!(parse_conversation_page(r#"{"error":"access_denied"}"#).is_err());
     }
 }

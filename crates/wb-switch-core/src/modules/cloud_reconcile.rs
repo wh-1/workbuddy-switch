@@ -114,6 +114,45 @@ where
     sweep
 }
 
+/// 全账巡检（**只读，永不删**）：云端全账 × 本机状态 → 分类计数。
+///
+/// 与 `sweep_stale_mappings` 的口径差别：那个只看「本机映射行」这本账，
+/// 看不到云端还有哪些**本机映射库根本不知道**的会话；这里直接吃
+/// `GET /v2/as/conversations/?type=all` 的账号全域清单（跨设备，2026-09-15 打通）。
+///
+/// - `stale`   = 云端有 + 本机已软删 → 清理仍归 `sweep_stale_mappings`（那才有映射钥匙）
+/// - `foreign` = 云端有 + 本机无任何痕迹 → **他机/跨设备会话，永不删**
+/// - `localOnly` = 本机有 + 云端无 → 未上云
+///
+/// 取数失败（无 token / 网络错）只回 `enabled:false` + 原因，**不影响主流程**。
+pub fn inventory<F>(
+    token: Option<&str>,
+    local_alive: &HashSet<String>,
+    local_deleted: &HashSet<String>,
+    mut fetch: F,
+) -> Value
+where
+    F: FnMut(&str) -> Result<Vec<String>, String>,
+{
+    let tok = match token {
+        Some(t) => t,
+        None => return json!({"enabled": false, "reason": "noToken"}),
+    };
+    let cloud_sids = match fetch(tok) {
+        Ok(v) => v,
+        Err(e) => return json!({"enabled": false, "reason": e}),
+    };
+    let r = reconcile(&cloud_sids, local_alive, local_deleted);
+    json!({
+        "enabled": true,
+        "cloud": cloud_sids.len(),
+        "aligned": r.aligned.len(),
+        "stale": r.cloud_only.len(),
+        "foreign": r.unknown.len(),
+        "localOnly": r.ignored_local_only,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,5 +275,46 @@ mod tests {
         );
         assert_eq!(r["planned"], 1);
         assert_eq!(r["removed"], 0);
+    }
+
+    #[test]
+    fn inventory_classifies_without_any_delete() {
+        // 云端 4 条：c1/c4 本机存活 · c2 本机已软删 · c3 本机无痕迹（他机）
+        let alive = set(&["c1", "c4", "l1"]);
+        let deleted = set(&["c2"]);
+        let r = inventory(Some("tok"), &alive, &deleted, |_t| {
+            Ok(["c1", "c2", "c3", "c4"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect())
+        });
+        assert_eq!(r["enabled"], true);
+        assert_eq!(r["cloud"], 4);
+        assert_eq!(r["aligned"], 2);
+        assert_eq!(r["stale"], 1);
+        assert_eq!(r["foreign"], 1, "c3 是本机无痕迹的他机会话");
+        assert_eq!(r["localOnly"], 1, "l1 未上云");
+    }
+
+    #[test]
+    fn inventory_without_token_is_disabled_not_fatal() {
+        let r = inventory(None, &set(&["c1"]), &set(&[]), |_t| {
+            panic!("无 token 不得发请求")
+        });
+        assert_eq!(r["enabled"], false);
+        assert_eq!(r["reason"], "noToken");
+    }
+
+    #[test]
+    fn inventory_fetch_error_degrades_silently() {
+        let r = inventory(Some("tok"), &set(&[]), &set(&[]), |_t| {
+            Err("http 500".to_string())
+        });
+        assert_eq!(r["enabled"], false);
+        assert_eq!(r["reason"], "http 500");
+        assert!(
+            r.get("stale").is_none(),
+            "降级时不得报出任何可能被误读成「可删」的计数"
+        );
     }
 }

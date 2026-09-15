@@ -202,6 +202,23 @@ export interface AlignDataReport {
         skipped?: string;
         error?: string;
       };
+      /** 全账巡检（只读，永不删）：云端全账 × 本机 sessions → 分类计数。 */
+      inventory?: {
+        /** 取数成功才为 true；无凭证或网络错时为 false，只带 reason。 */
+        enabled?: boolean;
+        /** 云端全账条数（该账号名下，含他机与云端自动化）。 */
+        cloud?: number;
+        /** 与本机存活对得上的条数。 */
+        aligned?: number;
+        /** 云端有 + 本机已软删（真正清理归对账阶段）。 */
+        stale?: number;
+        /** 云端有 + 本机无痕迹 —— 别的设备的活会话，只报不删。 */
+        foreign?: number;
+        /** 本机有 + 云端无（还没上云）。 */
+        localOnly?: number;
+        /** enabled=false 时的原因（noToken / 网络错误）。 */
+        reason?: string;
+      };
     };
     /**
      * 仅预览：本次将复制的会话对瘦身的抵消。

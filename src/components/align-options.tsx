@@ -192,6 +192,18 @@ export function formatAlignReport(r: AlignDataReport): string[] {
             : `　云端对账：扫了 ${rc.mapped ?? 0} 条，清理 ${rc.planned ?? 0} 条残留（真删 ${rc.removed ?? 0}，云端本来就没 ${rc.alreadyGone ?? 0}）${rc.failed ? `，${rc.failed} 条没删掉下次再试` : ""}${unknownNote}`,
         );
       }
+      const inv = cl.inventory;
+      if (inv?.enabled) {
+        const extra = [
+          inv.foreign ? `${inv.foreign} 条是别的设备在用的（没动）` : "",
+          inv.stale ? `${inv.stale} 条本机已经删了` : "",
+        ].filter(Boolean).join("，");
+        lines.push(
+          `　云端全账：这个账号名下一共 ${inv.cloud ?? 0} 条会话，${inv.aligned ?? 0} 条跟你这边对得上` +
+            (extra ? `，${extra}` : "") +
+            (inv.localOnly ? `；本机另有 ${inv.localOnly} 条还没上云` : ""),
+        );
+      }
     }
   }
   lines.push(r.dryRun ? "以上为预览结果，尚未落盘" : "对齐完成（已先备份 db 与 settings）");

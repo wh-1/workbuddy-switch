@@ -614,6 +614,7 @@ pub fn slim_sessions(
     )?;
     if let Some(cloud) = report.get_mut("cloud") {
         cloud["reconcile"] = reconcile_cloud_stage(uid, dry_run);
+        cloud["inventory"] = inventory_cloud_stage(uid);
     }
     Ok(report)
 }
@@ -637,6 +638,28 @@ fn reconcile_cloud_stage(uid: &str, dry_run: bool) -> Value {
         token.as_deref(),
         dry_run,
         crate::modules::cloud_conv::delete_conversation,
+    )
+}
+
+/// 全账巡检阶段（**只读，永不删**）：云端全账 × 本机 sessions → 分类计数。
+///
+/// 吃 `GET /v2/as/conversations/?type=all`（跨设备全账，2026-09-15 打通）——
+/// 补上 `reconcile_cloud_stage` 的盲区：映射行那本账里**没有**的云端会话
+/// （他机创建 / 云端自动化）它根本看不见。
+///
+/// 只报数，不做任何删除：`foreign`（本机无痕迹）多半是别的设备的活会话，
+/// 删了就伤到别人。dry_run 与否都照跑（无副作用）。
+fn inventory_cloud_stage(uid: &str) -> Value {
+    let (alive, deleted) = match read_local_alive_deleted(&workbuddy_db_path()) {
+        Ok(v) => v,
+        Err(e) => return json!({ "error": e }),
+    };
+    let token = crate::modules::cloud_conv::token_of(uid);
+    crate::modules::cloud_reconcile::inventory(
+        token.as_deref(),
+        &alive,
+        &deleted,
+        crate::modules::cloud_conv::list_conversation_ids,
     )
 }
 
