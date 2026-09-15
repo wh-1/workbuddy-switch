@@ -54,6 +54,8 @@ npm/platform/*/bin/
 .env.local
 
 # 内部工作文档（含账号昵称/uid/积分等隐私，仅本地保留）
+# 按目录挡：HANDOFF.md / PROGRESS.md 在 .memory/ 和 docs/ 下都有，按文件名挡会漏
+.memory/
 HANDOFF.md
 docs/PROGRESS.md
 docs/6004_window_analysis.md
