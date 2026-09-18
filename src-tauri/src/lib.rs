@@ -1,5 +1,6 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 mod commands;
+mod commands_local;
 #[cfg(target_os = "macos")]
 mod instance_lock;
 #[cfg(desktop)]
@@ -175,6 +176,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_status,
             commands::get_accounts,
+            commands_local::discover_known_accounts,
+            commands_local::adopt_account,
             commands::get_codebuddy_cli_status,
             commands::install_codebuddy_cli_helper,
             commands::switch_codebuddy_cli_account,
@@ -193,6 +196,9 @@ pub fn run() {
             commands::preview_import_accounts,
             commands::import_accounts,
             commands::switch_account,
+            commands_local::align_automations,
+            commands_local::align_data,
+            commands_local::list_model_limits,
             commands::list_sessions,
             commands::copy_sessions,
             commands::open_permission_settings,

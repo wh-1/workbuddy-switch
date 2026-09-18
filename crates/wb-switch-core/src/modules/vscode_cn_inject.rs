@@ -160,11 +160,10 @@ pub fn resolve_state_db_path_for(
     if let Some(path) = candidates.iter().find(|p| p.exists()) {
         return Ok(path.clone());
     }
-    let preferred = candidates[0].clone();
-    if let Some(parent) = preferred.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("创建 globalStorage 失败: {e}"))?;
-    }
-    Ok(preferred)
+    // 纯解析，不落盘（2026-09-18 实测坑）：读路径（detect/status）会在没装 IDE 的
+    // 机器上走到这里，一旦建目录，`installed = data_dir.exists()` 就误判"已接入"，
+    // 还会留下删不掉的空目录（有进程可能重建）。写路径（inject）自带 create_dir_all。
+    Ok(candidates[0].clone())
 }
 
 fn data_root_from_db(db_path: &Path) -> Result<&Path, String> {
@@ -708,5 +707,17 @@ mod tests {
         let resolved = resolve_state_db_path(Some(&dir)).unwrap();
         assert_eq!(resolved, db);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// 回归（2026-09-18 实测坑）：只读解析不得创建目录，否则 status 的
+    /// `installed = data_dir.exists()` 会把没装 IDE 的机器误判成"已接入"。
+    #[test]
+    fn resolve_does_not_create_dirs() {
+        let dir =
+            std::env::temp_dir().join(format!("wb-cn-ide-nocreate-{}", uuid::Uuid::new_v4()));
+        let resolved = resolve_state_db_path(Some(&dir)).unwrap();
+        assert_eq!(resolved, dir.join("User").join("globalStorage").join("state.vscdb"));
+        assert!(!resolved.exists());
+        assert!(!dir.exists(), "只读解析不得创建任何目录");
     }
 }

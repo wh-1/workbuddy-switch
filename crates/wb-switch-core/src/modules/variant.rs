@@ -303,6 +303,12 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// Windows 下 `PathBuf::to_string_lossy()` 产出 `\` 分隔符，与正斜杠字面量
+    /// 比较会假阴性 ⇒ 路径断言一律先归一化。
+    fn norm(p: &Path) -> String {
+        p.to_string_lossy().replace('\\', "/")
+    }
+
     #[test]
     fn parse_is_backward_compatible() {
         assert_eq!(WbVariant::parse(None), WbVariant::Cn);
@@ -365,17 +371,17 @@ mod tests {
         let home = Path::new("/home/tester");
         let cn = WbVariant::Cn.auth_file_path_at(home, HostOs::Macos);
         assert_eq!(
-            cn.to_string_lossy(),
+            norm(&cn),
             "/home/tester/Library/Application Support/CodeBuddyExtension/Data/Public/auth/workbuddy-desktop.info"
         );
         let cn_win = WbVariant::Cn.auth_file_path_at(home, HostOs::Windows);
         assert_eq!(
-            cn_win.to_string_lossy(),
+            norm(&cn_win),
             "/home/tester/AppData/Local/CodeBuddyExtension/Data/Public/auth/workbuddy-desktop.info"
         );
         let cn_linux = WbVariant::Cn.auth_file_path_at(home, HostOs::Linux);
         assert_eq!(
-            cn_linux.to_string_lossy(),
+            norm(&cn_linux),
             "/home/tester/.local/share/CodeBuddyExtension/Data/Public/auth/workbuddy-desktop.info"
         );
 
@@ -462,11 +468,11 @@ mod tests {
             "com.workbuddy.workbuddy-ai"
         );
         assert_eq!(
-            WbVariant::Cn.macos_default_app_path().to_string_lossy(),
+            norm(&WbVariant::Cn.macos_default_app_path()),
             "/Applications/WorkBuddy.app"
         );
         assert_eq!(
-            WbVariant::Ai.macos_default_app_path().to_string_lossy(),
+            norm(&WbVariant::Ai.macos_default_app_path()),
             "/Applications/WorkBuddy AI.app"
         );
     }

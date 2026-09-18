@@ -978,9 +978,10 @@ pub fn launch_codebuddy_ide() -> Result<(), String> {
 pub fn status() -> Value {
     let data_dir = intl_data_dir();
     let db_path = intl_state_db_path();
-    let installed = codebuddy_ide_app_path().is_some()
-        || data_dir.as_ref().map(|p| p.exists()).unwrap_or(false);
+    // 判定收紧（2026-09-18 实测坑）：卸载残留的空数据目录不能算"已安装"，
+    // 以「app 可定位 或 state.vscdb 真实存在」为准（与 CN 侧同口径）。
     let db_exists = db_path.as_ref().map(|p| p.exists()).unwrap_or(false);
+    let installed = codebuddy_ide_app_path().is_some() || db_exists;
     let running = is_codebuddy_ide_running();
 
     let mut active_account_id = active_account_id_from_state();

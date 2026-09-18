@@ -53,7 +53,7 @@ const STORE_DIR_NAME: &str = ".wb-switch";
 // ---------------------------------------------------------------------------
 
 /// hook 脚本方言：平台原生。
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum ScriptKind {
     /// macOS / Linux：`sh`。
     Sh,
@@ -78,22 +78,31 @@ fn script_name(kind: ScriptKind) -> &'static str {
 
 /// hook 脚本正文。
 ///
+/// ⚠️ 事件文件路径必须在安装时**写死为绝对路径**：WorkBuddy App 在沙箱里执行 hook，
+/// 子进程的 `HOME` / `USERPROFILE` 被改写到每会话独立的临时主目录
+/// （`%LOCALAPPDATA%\Temp\wb-switch-events-<uuid>`，2026-09-18 实证 47 个沙箱事件目录），
+/// 依赖环境变量的相对定位会把事件写进沙箱、真路径永远收不到。
+///
 /// - `Sh`：一次 `cat` 读入 payload、一次 `printf` 追加（尽量单次 write，减少并发追加的
 ///   行内交错），最后必须回 `{}`——空 stdout 会被客户端当作 hook 失败。
+///   Windows 下经 HookExecutor 的 PortableGit bash 执行，`C:/` 正斜杠形式可靠。
 /// - `Cmd`：Windows 没有 `cat`，`findstr` 又有行长上限（429 的 payload 带完整助手消息，
 ///   可能超限），改用系统自带 PowerShell 读 stdin（UTF-8 保真）。每次事件多一次进程启动，
 ///   但事件只发生在每轮对话结束时，可接受；PowerShell 不可用时仍回 `{}`，不影响客户端。
-fn script_body(kind: ScriptKind) -> &'static str {
+fn script_body(kind: ScriptKind, events: &Path) -> String {
+    // Sh 侧统一用正斜杠（MSYS bash 对 `C:/...` 原生支持；反斜杠在引号里是转义雷区）。
+    let sh_events = events.to_string_lossy().replace('\\', "/");
+    let ps_events = events.to_string_lossy().to_string();
     match kind {
-        ScriptKind::Sh => {
-            "#!/bin/sh\npayload=$(cat)\nprintf '%s\\n' \"$payload\" >> \"$HOME/.wb-switch/hook-events.jsonl\"\nprintf '{}'\n"
-        }
-        ScriptKind::Cmd => concat!(
-            "@echo off\r\n",
-            "powershell -NoProfile -ExecutionPolicy Bypass -Command \"$d=[Console]::In.ReadToEnd(); ",
-            "if ($d.Trim().Length -gt 0) { Add-Content -LiteralPath (Join-Path $env:USERPROFILE '.wb-switch\\hook-events.jsonl') ",
-            "-Value $d.TrimEnd() -Encoding UTF8 }\"\r\n",
-            "echo {}\r\n",
+        ScriptKind::Sh => format!(
+            "#!/bin/sh\npayload=$(cat)\nprintf '%s\\n' \"$payload\" >> '{sh_events}'\nprintf '{{}}'\n"
+        ),
+        ScriptKind::Cmd => format!(
+            "@echo off\r\n\
+             powershell -NoProfile -ExecutionPolicy Bypass -Command \"$d=[Console]::In.ReadToEnd(); \
+             if ($d.Trim().Length -gt 0) {{ Add-Content -LiteralPath '{ps_events}' \
+             -Value $d.TrimEnd() -Encoding UTF8 }}\"\r\n\
+             echo {{}}\r\n"
         ),
     }
 }
@@ -446,9 +455,9 @@ fn write_script(layout: &HookLayout) -> Result<(), String> {
         std::fs::create_dir_all(parent)
             .map_err(|error| format!("创建 {} 失败：{error}", parent.display()))?;
     }
-    let body = script_body(script_kind());
+    let body = script_body(script_kind(), &layout.events);
     // 内容一致就不写：避免重复安装改动 mtime，也避免与手动编辑过的脚本互相覆盖。
-    if std::fs::read_to_string(&layout.script).ok().as_deref() == Some(body) {
+    if std::fs::read_to_string(&layout.script).ok().as_deref() == Some(body.as_str()) {
         return Ok(());
     }
     std::fs::write(&layout.script, body)
@@ -562,7 +571,9 @@ fn uninstall_at(layout: &HookLayout) -> Result<Value, String> {
         }
     }
     // 脚本只在内容仍是本工具生成的那一份时删除；用户改过就保留，不做猜测。
-    if std::fs::read_to_string(&layout.script).ok().as_deref() == Some(script_body(script_kind())) {
+    if std::fs::read_to_string(&layout.script).ok().as_deref()
+        == Some(script_body(script_kind(), &layout.events).as_str())
+    {
         let _ = std::fs::remove_file(&layout.script);
     }
     if errors.is_empty() {
@@ -641,13 +652,18 @@ mod tests {
 
     #[test]
     fn script_body_appends_payload_and_always_returns_empty_object() {
-        let sh = script_body(ScriptKind::Sh);
-        assert!(sh.contains("hook-events.jsonl"), "{sh}");
-        assert!(sh.trim_end().ends_with("printf '{}'"), "{sh}");
-
-        let cmd = script_body(ScriptKind::Cmd);
-        assert!(cmd.contains("hook-events.jsonl"), "{cmd}");
-        assert!(cmd.trim_end().ends_with("echo {}"), "{cmd}");
+        // 事件路径必须写死为绝对路径：沙箱会改写 HOME/USERPROFILE（2026-09-18 实证）。
+        let events = Path::new("/tmp/base").join(".wb-switch").join("hook-events.jsonl");
+        for kind in [ScriptKind::Sh, ScriptKind::Cmd] {
+            let body = script_body(kind, &events);
+            assert!(body.contains("hook-events.jsonl"), "{kind:?}: {body}");
+            assert!(body.contains("USERPROFILE") == false, "{kind:?} 不得再依赖环境变量");
+            assert!(body.trim_end().ends_with("printf '{}'") || body.trim_end().ends_with("echo {}"), "{kind:?}");
+        }
+        let sh = script_body(ScriptKind::Sh, &events);
+        assert!(sh.contains(&events.to_string_lossy().replace('\\', "/")), "{sh}");
+        let cmd = script_body(ScriptKind::Cmd, &events);
+        assert!(cmd.contains(events.to_string_lossy().as_ref()), "{cmd}");
     }
 
     #[test]
@@ -687,10 +703,12 @@ mod tests {
         let stop = root["hooks"]["Stop"].as_array().expect("Stop 数组");
         assert_eq!(stop.len(), 2, "只应追加一条我们的条目：{stop:?}");
         assert_eq!(stop[0]["hooks"][0]["command"], "echo user", "用户条目保留");
+        // Windows 的脚本名是 ：断言按平台取，硬编码  在 Windows 上必失败。
+        let expected_script = if cfg!(windows) { SCRIPT_NAME_CMD } else { SCRIPT_NAME_SH };
         assert!(stop[1]["hooks"][0]["command"]
             .as_str()
             .expect("命令")
-            .contains("hook.sh"));
+            .contains(expected_script));
         assert_eq!(
             root["hooks"]["FinalStop"]
                 .as_array()

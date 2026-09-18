@@ -4,6 +4,7 @@
 //! `_find_project_jsonl` / `copy_session_to_user` / `_register_edge_sync_mapping` /
 //! `copy_sessions_for_switch` / `backup_workbuddy_db` / `workbuddy_db_path`。
 //!
+//! 硬链接共享（autoLink）已拆至 `session_share.rs`。
 //! WorkBuddy 5.x 数据三件套（缺一不可）：
 //!   1) 正文：`~/.workbuddy/projects/{workspace}/{cid}.jsonl`（JSONL 含 sessionId 字段）
 //!   2) 元数据：`~/.workbuddy/workbuddy.db` sessions 表（id = conversation id = UUID）
@@ -45,6 +46,14 @@ fn edge_sync_db_name(variant: WbVariant) -> &'static str {
 }
 
 fn edge_sync_db_path(variant: WbVariant) -> PathBuf {
+    // 国内版保留代次探测（v3 曾短暂存在；latest_mapping_db 按 v4→v3→v2→无名取最新，
+    // 覆盖上游的纯文件名写死——写死 v2 等于没写，见 cloud_conv.rs）。
+    // 国际版数据根独立（Ai.data_root()），恒为 v4（上游 09-16 实测）。
+    if variant == WbVariant::Cn {
+        if let Some(p) = crate::modules::cloud_conv::latest_mapping_db() {
+            return p;
+        }
+    }
     variant.data_root().join(edge_sync_db_name(variant))
 }
 
@@ -110,14 +119,14 @@ fn nonempty_text(value: Option<String>) -> Option<String> {
 }
 
 /// WorkBuddy 侧栏展示名：优先 custom_title（用户改名 / 定时任务名），否则 title。
-fn session_display_title(title: Option<String>, custom_title: Option<String>) -> String {
+pub(crate) fn session_display_title(title: Option<String>, custom_title: Option<String>) -> String {
     nonempty_text(custom_title)
         .or_else(|| nonempty_text(title))
         .unwrap_or_else(|| "(无标题)".to_string())
 }
 
 /// Claw 是账号绑定的 IM 渠道工作区，复制会话行不够，目标账号也用不了。
-fn is_claw_workspace(cwd: &str) -> bool {
+pub(crate) fn is_claw_workspace(cwd: &str) -> bool {
     cwd.trim()
         .trim_end_matches(['/', '\\'])
         .rsplit(['/', '\\'])
@@ -198,7 +207,7 @@ pub fn list_sessions_for_user(variant: WbVariant, uid: &str) -> Value {
 }
 
 /// 在 `{档位数据根}/projects/{workspace}/{cid}.jsonl` 定位会话正文。
-fn find_project_jsonl(variant: WbVariant, cid: &str) -> Option<PathBuf> {
+pub(crate) fn find_project_jsonl(variant: WbVariant, cid: &str) -> Option<PathBuf> {
     let projects = variant.data_root().join("projects");
     if !projects.is_dir() {
         return None;
@@ -219,20 +228,39 @@ fn find_project_jsonl(variant: WbVariant, cid: &str) -> Option<PathBuf> {
     None
 }
 
-/// 备份 workbuddy.db（含 -wal/-shm），返回主库备份路径。对照 `backup_workbuddy_db`。
-fn backup_workbuddy_db(variant: WbVariant, backup_root: &Path) -> Option<PathBuf> {
-    let db = workbuddy_db_path(variant);
+/// 备份 workbuddy.db（含 `-wal` / `-shm`），返回主库备份路径；失败 ⇒ `None`。
+pub(crate) fn backup_workbuddy_db(variant: WbVariant, backup_root: &Path) -> Option<PathBuf> {
+    backup_db_files(&workbuddy_db_path(variant), backup_root)
+}
+
+/// 把 `db` 及其 `-wal` / `-shm` 拷进 `backup_root`，返回主库备份路径。
+///
+/// 拆出来是为了可测：生产包装 `backup_workbuddy_db` 固定用真实库路径，单测没法碰。
+///
+/// - 主库拷不动 ⇒ `None`（**不返回一个「看起来有、实际没有」的回滚点**）；
+/// - `-wal` / `-shm` 缺失属正常（已 checkpoint 或非 WAL 模式），但**存在却拷不动**
+///   说明备份不完整、回滚可能丢尾部事务 ⇒ 同样判为无备份。
+fn backup_db_files(db: &Path, backup_root: &Path) -> Option<PathBuf> {
     if !db.is_file() {
         return None;
     }
     std::fs::create_dir_all(backup_root).ok()?;
-    for suffix in ["", "-wal", "-shm"] {
+    let dst_main = backup_root.join("workbuddy.db");
+    if let Err(e) = std::fs::copy(db, &dst_main) {
+        eprintln!("[backup] workbuddy.db 备份失败，本次没有可用回滚点：{e}");
+        return None;
+    }
+    for suffix in ["-wal", "-shm"] {
         let src = PathBuf::from(format!("{}{}", db.to_string_lossy(), suffix));
-        if src.is_file() {
-            let _ = std::fs::copy(&src, backup_root.join(format!("workbuddy.db{suffix}")));
+        if !src.is_file() {
+            continue;
+        }
+        if let Err(e) = std::fs::copy(&src, backup_root.join(format!("workbuddy.db{suffix}"))) {
+            eprintln!("[backup] workbuddy.db{suffix} 备份失败，备份不完整：{e}");
+            return None;
         }
     }
-    Some(backup_root.join("workbuddy.db"))
+    Some(dst_main)
 }
 
 /// 把 source_uid 的一个会话复制为 target_uid 的新会话（路径 B：生成新 id）。
@@ -279,7 +307,10 @@ pub fn copy_session_to_user(
         .join("sessions")
         .join(variant.as_str())
         .join(utc_iso());
-    backup_workbuddy_db(variant, &backup_root);
+    // 只有真的落盘才算备份：原来无条件上报 `backup_root` 目录路径，拷贝失败时
+    // 报告里也会出现一个空目录，用户以为有回滚点。
+    let db_backup =
+        backup_workbuddy_db(variant, &backup_root).map(|p| p.to_string_lossy().to_string());
     insert_session_copy(&db, &new_cid, cid, source_uid, target_uid)?;
 
     // 3) 注册云端映射：新会话归属目标账号（msg_channel=convmsg:{target_uid}）
@@ -290,14 +321,14 @@ pub fn copy_session_to_user(
         "newId": new_cid,
         "jsonlCopied": jsonl_copied,
         "mappingWritten": mapping_written,
-        "backup": backup_root.to_string_lossy().to_string(),
+        "backup": db_backup,
     }))
 }
 
 /// 在 workbuddy.db 中把源会话行复制为新 id（动态列，覆盖 id/user_id/时间戳）。
 ///
 /// db 不存在或 sessions 表不存在时静默成功（对应 Python 版跳过）。源行不存在则无操作。
-fn insert_session_copy(
+pub(crate) fn insert_session_copy(
     db_path: &Path,
     new_cid: &str,
     cid: &str,
@@ -359,7 +390,13 @@ fn insert_session_copy(
 }
 
 /// 把新会话注册进 edge_sync_mapping（云端归属关键）。失败不致命，返回 False。
-fn register_edge_sync_mapping(variant: WbVariant, new_cid: &str, target_uid: &str) -> bool {
+///
+/// ⚠️ 映射库必须取「App 实际在读的那一个」：国内版走 latest_mapping_db 代次探测
+/// （v4→v3→v2，写死 v2 会把归属写进 App 不读的旧库，HANDOFF 坑位 40）；国际版
+/// 数据根独立、恒为 v4（edge_sync_db_path 内已分档位处理）。且**只在云端 conv
+/// 已建好后调用**——先 register 后建 conv 会让 App 把映射行当「已上云」，
+/// 云端永远缺 conv（坑 48）。
+pub(crate) fn register_edge_sync_mapping(variant: WbVariant, new_cid: &str, target_uid: &str) -> bool {
     insert_edge_sync_mapping(&edge_sync_db_path(variant), new_cid, target_uid)
 }
 
@@ -449,6 +486,8 @@ fn copy_sessions_for_switch_at(
     Ok(report)
 }
 
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -456,19 +495,19 @@ mod tests {
 
     #[test]
     fn db_paths_follow_variant_data_root() {
+        // Windows 下 to_string_lossy 产出反斜杠，直接 ends_with("a/b") 会假阴性。
+        let norm = |p: &std::path::Path| p.to_string_lossy().replace('\\', "/");
         let cn = workbuddy_db_path(WbVariant::Cn);
-        assert!(cn.to_string_lossy().ends_with(".workbuddy/workbuddy.db"));
-        assert!(edge_sync_db_path(WbVariant::Cn)
-            .to_string_lossy()
-            .ends_with("edge-sync-mapping-v2.db"));
+        assert!(norm(&cn).ends_with(".workbuddy/workbuddy.db"));
+        // 文件名断言走纯函数 edge_sync_db_name：Cn 实际路径会被
+        // latest_mapping_db 代次探测改写（本机可能停在 v3），不宜写死断言。
+        assert_eq!(edge_sync_db_name(WbVariant::Cn), "edge-sync-mapping-v2.db");
 
         let ai = workbuddy_db_path(WbVariant::Ai);
         assert_eq!(ai.parent(), Some(WbVariant::Ai.data_root().as_path()));
         assert_ne!(cn, ai);
         // 国际版实测为 v4 库，不能套用国内版 v2 文件名。
-        assert!(edge_sync_db_path(WbVariant::Ai)
-            .to_string_lossy()
-            .ends_with("edge-sync-mapping-v4.db"));
+        assert_eq!(edge_sync_db_name(WbVariant::Ai), "edge-sync-mapping-v4.db");
         assert_ne!(
             edge_sync_db_path(WbVariant::Ai),
             edge_sync_db_path(WbVariant::Cn)
@@ -605,6 +644,52 @@ mod tests {
             "wb_switch_test_{}_{name}.db",
             uuid::Uuid::new_v4().simple()
         ))
+    }
+
+    /// 建一个本次用例独占的临时目录（Windows 下并发跑用例不会撞名）。
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "wb_switch_{name}_{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    /// 备份必须真的落盘：主库与存在的 `-wal` 都到位，缺失的 `-shm` 不凭空造。
+    #[test]
+    fn backup_db_files_copies_main_and_wal() {
+        let dir = temp_dir("backup-ok");
+        let db = dir.join("workbuddy.db");
+        std::fs::write(&db, b"main").expect("write main");
+        std::fs::write(dir.join("workbuddy.db-wal"), b"wal").expect("write wal");
+        let dst = dir.join("out");
+
+        let got = backup_db_files(&db, &dst).expect("主库存在 ⇒ 应返回备份路径");
+
+        assert_eq!(got, dst.join("workbuddy.db"));
+        assert_eq!(std::fs::read(&got).expect("read backup"), b"main");
+        assert_eq!(
+            std::fs::read(dst.join("workbuddy.db-wal")).expect("read wal backup"),
+            b"wal"
+        );
+        assert!(
+            !dst.join("workbuddy.db-shm").exists(),
+            "`-shm` 本来就不在 ⇒ 不该凭空出现一个空文件"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 主库不存在/拷不动 ⇒ `None`。上层据此上报「这次没有回滚点」，
+    /// 而不是照抄一个目录路径（原实现 `let _ = fs::copy` 就是这么谎报的）。
+    #[test]
+    fn backup_db_files_returns_none_when_main_missing() {
+        let dir = temp_dir("backup-miss");
+        assert!(
+            backup_db_files(&dir.join("nope.db"), &dir.join("out")).is_none(),
+            "主库不在 ⇒ 必须判为无备份"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -744,4 +829,7 @@ mod tests {
             "/Users/apple/Documents/AI-PROJECT/LetterTotTown"
         ));
     }
+
+    // ---- 硬链接增量共享 ----
+
 }

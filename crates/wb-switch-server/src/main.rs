@@ -8,6 +8,7 @@
 //! ```
 
 mod api;
+mod api_local;
 
 use serde_json::json;
 
@@ -139,24 +140,42 @@ async fn main() {
 }
 
 async fn serve(args: &[String]) {
-    let mut port = default_port();
-    if let Some(i) = args.iter().position(|a| a == "--port") {
-        if let Some(p) = args.get(i + 1).and_then(|p| p.parse::<u16>().ok()) {
-            port = p;
-        }
-    }
+    let explicit = args
+        .iter()
+        .position(|a| a == "--port")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|p| p.parse::<u16>().ok());
+    let start = explicit.unwrap_or_else(default_port);
 
     let app = api::router();
-    let addr = format!("127.0.0.1:{port}");
-    let listener = match tokio::net::TcpListener::bind(&addr).await {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("启动失败: 端口 {port} 被占用或不可用（{e}）。可用 --port 指定其他端口。");
-            std::process::exit(1);
+    // 默认端口可能落在 Windows 的 TCP 保留区间（Hyper-V/WSL 的 excluded port range，
+    // bind 直接报 os error 10013）或已被别的实例占用 ⇒ 顺序往后试，最多 64 个。
+    // 显式 `--port` 时不回退：用户指定了端口，失败就该报错而不是悄悄换。
+    let attempts = if explicit.is_some() { 1u16 } else { 64 };
+    let mut bound = None;
+    let mut last_error: Option<(u16, std::io::Error)> = None;
+    for offset in 0..attempts {
+        let candidate = start.saturating_add(offset);
+        let addr = format!("127.0.0.1:{candidate}");
+        match tokio::net::TcpListener::bind(&addr).await {
+            Ok(listener) => {
+                bound = Some((listener, candidate));
+                break;
+            }
+            Err(e) => last_error = Some((candidate, e)),
         }
+    }
+    let Some((listener, port)) = bound else {
+        let (failed_port, e) = last_error.expect("至少尝试过一次绑定");
+        eprintln!("启动失败: 端口 {failed_port} 不可用（{e}）。可用 --port 指定其他端口。");
+        std::process::exit(1);
     };
+    let addr = format!("127.0.0.1:{port}");
 
     println!("workbuddy-switch v{}", update::APP_VERSION);
+    if port != start {
+        println!("（默认端口 {start} 不可用，已自动改用 {port}）");
+    }
     println!("webui: http://{addr}");
     println!("按 Ctrl+C 停止服务。");
 

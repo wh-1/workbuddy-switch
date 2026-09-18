@@ -258,6 +258,7 @@ interface Props {
   /** 该账号当前受限的模型（来自本机日志台账）；空/缺失=无受限，不渲染图标。 */
   rateLimits?: RateLimitEntry[];
   credit?: CreditExpiry;
+  /** 该账号的「模型 × 解锁时刻」限额状态（只在受限时渲染 chip） */
   creditLoading?: boolean;
   /** 该账号积分最近一次查询完成时间（时间戳） */
   creditUpdatedAt?: number;

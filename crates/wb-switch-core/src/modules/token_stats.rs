@@ -68,6 +68,10 @@ impl Totals {
     fn value(&self) -> Value {
         let cache_hit_rate =
             (self.usage.input > 0).then(|| self.usage.read as f64 / self.usage.input as f64);
+        // 每次调用的平均输入。命中率只说明「已付的输入没被重复计价」，真正的成本靶点
+        // 是这个数：它包含每轮都要重发的前缀（system / 指令 / 工具定义）与上下文。
+        let avg_input_per_record = (self.records > 0)
+            .then(|| self.usage.input as f64 / self.records as f64);
         // `input` already includes cache reads; expose the same headline total
         // used by the dashboard without double-counting the cached portion.
         let total = usage_total(self.usage);
@@ -80,6 +84,7 @@ impl Totals {
             "uncachedInput": self.usage.input.saturating_sub(self.usage.read),
             "records": self.records,
             "cacheHitRate": cache_hit_rate,
+            "avgInputPerRecord": avg_input_per_record,
         })
     }
 }
@@ -995,6 +1000,32 @@ pub fn get_statistics(days: Option<i64>) -> Value {
     })
 }
 
+/// 本地新增：与 [`get_statistics`] 完全相同的采集与口径，但接受**显式 cutoff**，
+/// 用于 7/30/90 白名单之外的时间窗（如「今日」）。
+///
+/// 刻意不复用 `get_statistics` 的代码、也不改动它一行 —— 让上游文件保持逐字原样，
+/// 把本地改动限制成「纯新增函数」，压缩与上游合并时的冲突面。
+pub fn get_statistics_since(cutoff: Option<i64>) -> Value {
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let generated_at = crate::modules::config::now_ms();
+    let range_days = cutoff.map(|value| (generated_at - value) / 86_400_000);
+    let ide_projects = ide_project_by_session();
+    json!({
+        "generatedAt": generated_at,
+        "rangeDays": range_days,
+        "sources": [
+            source(home.join(".workbuddy/projects"), "workbuddy", cutoff, false),
+            source(home.join(".codebuddy/projects"), "codebuddy-cli", cutoff, false),
+            ide_source(
+                codebuddy_extension_data_dir(),
+                "codebuddy-ide",
+                cutoff,
+                &ide_projects,
+            ),
+        ],
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1116,6 +1147,31 @@ mod tests {
     }
 
     #[test]
+    fn value_reports_average_input_per_record() {
+        // 没有记录时不给平均值，避免除零编造出一个 0
+        assert_eq!(Totals::default().value()["avgInputPerRecord"], Value::Null);
+
+        let mut totals = Totals::default();
+        totals.add(Usage {
+            input: 100,
+            output: 10,
+            read: 90,
+            write: 1,
+        });
+        totals.add(Usage {
+            input: 300,
+            output: 20,
+            read: 100,
+            write: 0,
+        });
+
+        let value = totals.value();
+        assert_eq!(value["records"], 2);
+        assert_eq!(value["avgInputPerRecord"], 200.0);
+        assert_eq!(value["cacheHitRate"], 190.0_f64 / 400.0);
+    }
+
+    #[test]
     fn source_excludes_subagents_and_counts_each_record_once() {
         let root = std::env::temp_dir().join(format!(
             "wb-switch-token-stats-{}-{}",
@@ -1196,14 +1252,23 @@ mod tests {
         // iteration, which is not sorted. The copy would then be processed
         // first, own the replayed record, and leave the original with zero
         // records. Pin the mtimes so the original always precedes its copy.
-        std::fs::File::open(project.join("session-original.jsonl"))
-            .expect("open original fixture")
-            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(60))
-            .expect("pin original mtime");
-        std::fs::File::open(project.join("session-forked.jsonl"))
-            .expect("open forked fixture")
-            .set_modified(std::time::SystemTime::now())
-            .expect("pin forked mtime");
+        // Opened with `write(true)` on purpose: Windows implements
+        // `set_modified` via `SetFileTime`, which needs FILE_WRITE_ATTRIBUTES,
+        // so a read-only `File::open` handle fails with "access denied" there.
+        // A writable handle works on every platform.
+        let pin_mtime = |name: &str, when: std::time::SystemTime| {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(project.join(name))
+                .expect("open fixture to pin mtime")
+                .set_modified(when)
+                .expect("pin fixture mtime");
+        };
+        pin_mtime(
+            "session-original.jsonl",
+            std::time::SystemTime::now() - std::time::Duration::from_secs(60),
+        );
+        pin_mtime("session-forked.jsonl", std::time::SystemTime::now());
 
         let result = source(root.clone(), "fixture", None, false);
         // The replayed record counts once; the fork's new record still counts.
@@ -1567,11 +1632,17 @@ mod tests {
         )
         .expect("write forked fixture");
         // 与聚合去重用例相同：固定 mtime，保证原始会话先于副本被处理。
-        std::fs::File::open(project.join("session-original.jsonl"))
+        // Windows 上 `set_modified` 走 SetFileTime 需要 FILE_WRITE_ATTRIBUTES，
+        // 只读句柄会 Access Denied ⇒ 用 write(true) 打开（同 pin_mtime 模式）。
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(project.join("session-original.jsonl"))
             .expect("open original fixture")
             .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(60))
             .expect("pin original mtime");
-        std::fs::File::open(project.join("session-forked.jsonl"))
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(project.join("session-forked.jsonl"))
             .expect("open forked fixture")
             .set_modified(std::time::SystemTime::now())
             .expect("pin forked mtime");
@@ -1971,12 +2042,17 @@ mod tests {
         .expect("write second-root fixture");
         // 与 source_deduplicates_copied_session_history 同理：毫秒级 mtime 并列时
         // 顺序退化为 readdir，重放记录可能先被第二个根认领。pin 住 mtime 让
-        // 原始会话先处理，断言才稳定。
-        std::fs::File::open(projects.join("session-original.jsonl"))
+        // 原始会话先处理，断言才稳定。（Windows 只读句柄 set_modified 会
+        // Access Denied ⇒ 用 write(true) 打开，同 pin_mtime 模式。）
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(projects.join("session-original.jsonl"))
             .expect("open original fixture")
             .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(60))
             .expect("pin original mtime");
-        std::fs::File::open(sessions.join("session-root-two.jsonl"))
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(sessions.join("session-root-two.jsonl"))
             .expect("open second-root fixture")
             .set_modified(std::time::SystemTime::now())
             .expect("pin second-root mtime");

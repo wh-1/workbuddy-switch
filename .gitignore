@@ -23,6 +23,11 @@ npm/bin/wb-switch-*
 accounts.json
 backups/
 
+# 本地文档区（.memory/ reports/ 等含隐私：uid / 昵称 / 会话 id）
+# 2026-09-17 起由私有主干仓 wb-switch-private 纳管版本管理；
+# 公开 fork 只接收 filter 脚本剔除隐私路径后的历史（scripts/analysis/publish_to_fork.py）。
+# ⚠️ 红线：origin(fork) remote 已移除，禁止直接向 fork push 任何包含档案路径的分支。
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
@@ -38,10 +43,33 @@ npm/platform/*/bin/
 # 个人开发工作流（trellis）
 .trellis/
 
-# AI 工具本地配置
+# AI 工具本地配置（.workbuddy/ 仅含项目 memory 日志，2026-09-17 起由私有主干纳管）
 .codebuddy/
 .cursor/
 .agents/
 .codex/
 .grok/
-/.workbuddy/
+
+# 环境变量（真实配置不入库，规范第 10.1 章）
+.env
+.env.local
+
+# 内部工作文档与诊断脚本（.memory/ HANDOFF.md / docs/PROGRESS.md / scripts/analysis/）
+# 2026-09-17 起纳入私有主干仓 wb-switch-private；发布到 fork 前由脚本整体剔除。
+# 按目录挡：HANDOFF.md / PROGRESS.md 在 .memory/ 和 docs/ 下都有，按文件名挡会漏
+# （以上规则已放开，此注释保留作历史背景）
+
+# Python 字节码与临时数据库副本
+__pycache__/
+reports/*.db
+
+# Python 字节码与临时数据库副本
+__pycache__/
+reports/*.db
+
+# 探针临时产物（含 credentials.json 等真实凭据，永不入库）
+scripts/reports/
+
+# 临时诊断产物（收尾时必须清理，别入库）
+reports/.tmp_*
+scripts/analysis/.tmp_*
