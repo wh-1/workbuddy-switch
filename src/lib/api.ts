@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   AccountMeta,
   AccountRecord,
+  AlignDataReport,
   AppNotification,
   AppStatus,
   AutoRotateConfig,
@@ -15,6 +16,7 @@ import type {
   CheckinResult,
   CreditExpiry,
   CreditStatistics,
+  DiscoveredAccount,
   TokenStatistics,
   GithubConfig,
   ImportPreviewAccount,
@@ -48,7 +50,23 @@ import { screenshotDemoResponse } from "./screenshot-demo";
  * - 桌面 App（Tauri）：`invoke` 调用 Rust commands
  * - webui（浏览器）：HTTP fetch 调用本地 workbuddy-switch 服务（127.0.0.1）
  */
-const API_BASE = "http://127.0.0.1:57890";
+/**
+ * webui 模式的服务地址。
+ *
+ * 页面本身就是这个服务托管的 ⇒ **同源**（`location.origin`）永远是对的：
+ * 起在哪个端口、默认端口被系统保留后自动回退到哪个端口，前端都不用改。
+ * 仅当页面不是由该服务提供时（file:// 打开、或 Tauri 壳里但走了 HTTP 分支）
+ * 才回落到固定的 127.0.0.1:57890。
+ */
+function resolveApiBase(): string {
+  if (typeof window === "undefined") return "http://127.0.0.1:57890";
+  const { protocol, origin } = window.location;
+  return protocol === "http:" || protocol === "https:"
+    ? origin
+    : "http://127.0.0.1:57890";
+}
+
+const API_BASE = resolveApiBase();
 
 const DEMO_READ_COMMANDS = new Set([
   "get_status", "get_accounts", "get_codebuddy_cli_status", "get_codebuddy_cn_ide_status", "get_codebuddy_ide_status", "get_vscode_ext_status", "list_vscode_sessions", "get_checkin_status",
@@ -56,7 +74,7 @@ const DEMO_READ_COMMANDS = new Set([
   "get_token_statistics",
   "get_checkin_logs", "get_auto_rotate_config", "rotate_status", "get_rotate_logs",
   "get_github_config", "check_update", "get_launch_at_login_enabled", "switch_progress",
-  "get_travel_status", "get_auto_travel_config", "get_rate_limits",
+  "discover_known_accounts", "get_travel_status", "get_auto_travel_config", "get_rate_limits",
   "get_rate_limit_hook_status", "get_rate_limit_config",
 ]);
 
@@ -89,6 +107,8 @@ type Route = { method: "GET" | "POST"; path: string };
 const ROUTES: Record<string, Route> = {
   get_status: { method: "GET", path: "/api/status" },
   get_accounts: { method: "GET", path: "/api/accounts" },
+  discover_known_accounts: { method: "GET", path: "/api/accounts/discover" },
+  adopt_account: { method: "POST", path: "/api/accounts/adopt" },
   get_codebuddy_cli_status: { method: "GET", path: "/api/codebuddy-cli/status" },
   install_codebuddy_cli_helper: { method: "POST", path: "/api/codebuddy-cli/install-helper" },
   switch_codebuddy_cli_account: { method: "POST", path: "/api/codebuddy-cli/switch" },
@@ -114,6 +134,8 @@ const ROUTES: Record<string, Route> = {
   switch_account: { method: "POST", path: "/api/switch" },
   list_sessions: { method: "GET", path: "/api/sessions" },
   copy_sessions: { method: "POST", path: "/api/sessions/copy" },
+  align_automations: { method: "POST", path: "/api/automations/align" },
+  align_data: { method: "POST", path: "/api/align/data" },
   session_links_preview: { method: "POST", path: "/api/session-links/preview" },
   get_checkin_status: { method: "GET", path: "/api/checkin/status" },
   get_credit_expiry: { method: "POST", path: "/api/credits" },
@@ -215,6 +237,16 @@ export function getStatus(variant?: WbVariant): Promise<AppStatus> {
 /** 返回全部档位的账号，由调用方按 `variant` 过滤。 */
 export function getAccounts(): Promise<{ accounts: AccountMeta[] }> {
   return call("get_accounts");
+}
+
+/** 识别本机曾登录/留有数据的账号（对照在册，只读）。 */
+export function discoverKnownAccounts(): Promise<{ accounts: DiscoveredAccount[] }> {
+  return call("discover_known_accounts");
+}
+
+/** 用最新 auth 历史备份补录指定 uid 进账号库。 */
+export function adoptAccount(uid: string): Promise<{ ok: boolean; account: AccountMeta }> {
+  return call("adopt_account", { uid });
 }
 
 export function getCodebuddyCliStatus(): Promise<CodeBuddyCliStatus> {
@@ -386,9 +418,31 @@ export function switchAccount(args: {
   restart?: boolean;
   shareSessions?: boolean;
   copySessionIds?: string[];
+  alignAutomations?: boolean;
+  alignFiles?: boolean;
+  slimKeep?: number;
+  /** 增量硬链接共享（默认开后端 true；显式传 false 才关）。 */
+  autoLink?: boolean;
+  dryRun?: boolean;
   syncSelections?: SessionSyncSelection[];
 }): Promise<SwitchResult> {
   return call("switch_account", args as unknown as Record<string, unknown>);
+}
+
+/** 不切号，把当前自动化归属立即对齐到指定账号（需先完全退出 WorkBuddy）。 */
+export function alignAutomations(accountId: string): Promise<SwitchResult["automationAlign"]> {
+  return call("align_automations", { accountId });
+}
+
+/** 多账号数据对齐（L1/L4/L5），dryRun=true 只预览。需先完全退出 WorkBuddy。 */
+export function alignData(args: {
+  accountId: string;
+  alignAutomations?: boolean;
+  alignFiles?: boolean;
+  slimKeep?: number;
+  dryRun?: boolean;
+}): Promise<AlignDataReport> {
+  return call("align_data", args as unknown as Record<string, unknown>);
 }
 
 /** 切换进度（webui 轮询用；桌面端走事件，此函数无副作用）。 */
@@ -700,6 +754,7 @@ export function asError(e: unknown): string {
   if (e instanceof Error) return e.message;
   return JSON.stringify(e ?? "未知错误");
 }
+
 
 // ---------------------------------------------------------------------------
 // 通知存档（toast 事后可查）

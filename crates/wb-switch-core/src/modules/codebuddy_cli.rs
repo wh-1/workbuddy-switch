@@ -872,9 +872,11 @@ fn node_path_from_shell_output(stdout: &[u8]) -> Option<PathBuf> {
         .lines()
         .rev()
         .find_map(|line| {
-            let path = PathBuf::from(line.trim());
-            (path.is_absolute() && path.file_name().is_some_and(|name| name == "node"))
-                .then_some(path)
+            let trimmed = line.trim();
+            let path = PathBuf::from(trimmed);
+            // Windows 测试环境里 `/Users/...` 不算 is_absolute()，Unix 根路径也接受
+            let absolute = path.is_absolute() || trimmed.starts_with('/');
+            (absolute && path.file_name().is_some_and(|name| name == "node")).then_some(path)
         })
 }
 
@@ -1440,6 +1442,11 @@ pub fn switch_active_account(account_id: &str) -> Result<Value, String> {
 
     let region_changed = previous_variant != Some(variant);
 
+    // gateway(私有) —— 跟随模式：CLI 切号成功后把新 CLI 当前号同步进网关 auths
+    // 目录（跟随源第一优先 = CLI 当前账号）。失败不阻断切号，进 pending 补偿。
+    let gateway_sync =
+        crate::modules::gateway_sync::sync_gateway_credentials_for(Some(&canonical_id), "cli-switch");
+
     Ok(json!({
         "ok": true,
         "configured": true,
@@ -1451,6 +1458,7 @@ pub fn switch_active_account(account_id: &str) -> Result<Value, String> {
         "regionChanged": region_changed,
         "cliClosed": cli_closed,
         "closedProcessCount": closed_count,
+        "gatewaySync": gateway_sync,
         "message": region_switch_message(variant, region_changed, closed_count),
     }))
 }

@@ -1165,9 +1165,11 @@ pub fn launch_codebuddy_cn() -> Result<(), String> {
 pub fn status() -> Value {
     let data_dir = codebuddy_cn_data_dir();
     let db_path = codebuddy_cn_state_db_path();
-    let installed =
-        codebuddy_cn_app_path().is_some() || data_dir.as_ref().map(|p| p.exists()).unwrap_or(false);
+    // 判定收紧（2026-09-18 实测坑）：IDE 卸载后常残留空数据目录（甚至被别的进程
+    // 重建），`data_dir.exists()` 会误判"已接入"、按钮可点却必然报错。
+    // 以「app 可定位 或 state.vscdb 真实存在」为准。
     let db_exists = db_path.as_ref().map(|p| p.exists()).unwrap_or(false);
+    let installed = codebuddy_cn_app_path().is_some() || db_exists;
     let running = is_codebuddy_cn_running();
 
     let mut active_account_id = active_account_id_from_state();

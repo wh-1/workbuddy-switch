@@ -1069,6 +1069,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    #[cfg(unix)]
     fn symlinked_transaction_dir_is_preserved() {
         let dir = TempDir::new("symlink");
         let paths = dir.paths();

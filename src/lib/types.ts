@@ -22,6 +22,22 @@ export interface AccountMeta {
   variant?: WbVariant;
 }
 
+/** 本机曾登录/留有数据的账号（discover 结果，只读视图）。 */
+export interface DiscoveredAccount {
+  uid: string;
+  nickname: string | null;
+  email: string | null;
+  /** auth-history = 官方登录历史备份（含凭据，可补录）；residual = 仅数据残留 */
+  source: "auth-history" | "residual";
+  backupFiles: number;
+  backedUpAt: number | null;
+  inAccountList: boolean;
+  accessTokenExpiresAt: number | null;
+  refreshTokenExpiresAt: number | null;
+  /** 有 auth 历史备份且 refresh token 未过期，可一键补录 */
+  restorable: boolean;
+}
+
 export interface AppStatus {
   running: boolean;
   authFile: string;
@@ -272,10 +288,135 @@ export interface SwitchResult {
   /** 目标账号自身档位；缺省按国内版处理。 */
   variant?: WbVariant;
   backup: string | null;
+  dryRun?: boolean;
   sessionCopy?: SessionCopyReport;
+  /** 「增量硬链接共享」报告：源账号会话零拷贝共享给目标账号（inode 判重 + 统一保留名单）。 */
+  autoLink?: {
+    sourceUid: string;
+    targetUid: string;
+    dryRun?: boolean;
+    copied: { id: string; newId: string; planned?: boolean }[];
+    alreadyCopied: number;
+    /** 名单外（源侧不动，只计数）。 */
+    beyondKeep: number;
+    /** 统一保留名单（目标侧 sid），瘦身按它判定「名单外全删」。 */
+    keepTargetSids?: string[];
+    clawSkipped: number;
+    noBody: number;
+    errors?: { id: string; error: string }[];
+    backupDb?: string | null;
+  };
+  automationAlign?: {
+    targetUid: string;
+    automationsUpdated: number;
+    outboxUpdated: number;
+    backup: string | null;
+  };
+  alignData?: AlignDataReport;
   /** 本次的会话同步报告（未勾选同步时不返回）；含跳过与失败原因，不只是成功数。 */
   sessionSync?: SessionSyncReport;
   sessionRecovery?: SessionRecoveryReport;
+}
+
+export interface AlignDataReport {
+  targetUid: string;
+  dryRun: boolean;
+  noop?: boolean;
+  error?: string;
+  backup?: { db: string | null; settings: string | null };
+  automations?: { updated: number; outbox: number };
+  /** 「设置同步」：settings 深合并 / storage 补齐 / 画像 / my-files / 主题跟随。 */
+  settings?: {
+    sourceUid?: string | null;
+    claw?: { changed: number; keys?: string[]; skipped?: boolean; error?: string };
+    storage?: { copied: number; skipped: number; deferred: number; samples?: string[] };
+    memory?: { changed: boolean; bytes?: number; skipped?: boolean };
+    myFiles?: { files: number; changed: number; keys: number };
+    theme?: Record<string, unknown>;
+  };
+  /** 「会话瘦身」：每项目保留最近 N 条。 */
+  slim?: {
+    uid?: string;
+    keep?: number;
+    planned?: number;
+    deleted?: number;
+    /** 受保护的会话数（本次复制体，既不被删也不占名额）。 */
+    excluded?: number;
+    /** 本次的 db 回滚点；`null` = 备份没落盘（拷贝失败），不是「不需要备份」。 */
+    backupDb?: string | null;
+    /** 每个项目将被删除的条数。 */
+    groups?: { cwd: string; count: number }[];
+    /** 云端连带删除的结果（仅勾了「云端一起瘦」时出现）。 */
+    cloud?: {
+      enabled: boolean;
+      /** 是否取到了该账号凭证；false 表示整个云端环节被跳过。 */
+      tokenReady: boolean;
+      /** 仅预览：将向云端发几条删除请求。 */
+      planned?: number;
+      /** 云端删除请求的**合计**（= `removed` + `alreadyGone`）。 */
+      deleted?: number;
+      /** 其中的「真被这次请求删掉」数（HTTP 200）——只有它证明删成功。 */
+      removed?: number;
+      /** 其中的「云端本来就没有」数（HTTP 404）——归属已校验，视为干净。 */
+      alreadyGone?: number;
+      /** 云端说这条不归本次账号（映射记错）→ 已放弃云端、只本地软删。 */
+      forbidden?: number;
+      /** 云端删除失败 → **本地保留未删**，下次切号再试。 */
+      failed?: number;
+      keptLocal?: number;
+      samples?: string[];
+      /** 本机没有该会话的云端映射 → 只本地软删。 */
+      noMapping?: number;
+      /** 映射显示云端归别的账号 → 只本地软删（不碰别人的对话）。 */
+      foreign?: number;
+      /** 归属对得上但没取到凭证 → 云端整轮跳过，只本地软删。 */
+      noToken?: number;
+      /** 对账阶段：映射行全集 × 本机 sessions，清「本机已删但云端还在」的残留。 */
+      reconcile?: {
+        /** 本机映射行总数。 */
+        mapped?: number;
+        /** 本机已软删、云端待清的条数（dry-run 为将清数，真删为处理数）。 */
+        planned?: number;
+        removed?: number;
+        alreadyGone?: number;
+        failed?: number;
+        /** 映射行有、本机无行——可能是其他设备的活会话，只计数不删。 */
+        unknown?: number;
+        /** 本次瘦身刚处理过、对账不再重复请求的条数（幂等冗余的规避）。 */
+        skippedBySlim?: number;
+        /** 映射库缺失 → 对账跳过。 */
+        skipped?: string;
+        error?: string;
+      };
+      /** 全账巡检（只读，永不删）：云端全账 × 本机 sessions → 分类计数。 */
+      inventory?: {
+        /** 取数成功才为 true；无凭证或网络错时为 false，只带 reason。 */
+        enabled?: boolean;
+        /** 云端全账条数（该账号名下，含他机与云端自动化）。 */
+        cloud?: number;
+        /** 与本机存活对得上的条数。 */
+        aligned?: number;
+        /** 云端有 + 本机已软删（真正清理归对账阶段）。 */
+        stale?: number;
+        /** 云端有 + 本机无痕迹 —— 别的设备的活会话，只报不删。 */
+        foreign?: number;
+        /** 本机有 + 云端无（合计 = localOnlyAlive + localOnlyDeleted）。 */
+        localOnly?: number;
+        /** 本机**存活** + 云端无 —— 真·未上云的活会话，UI 显示这个。 */
+        localOnlyAlive?: number;
+        /** 本机已软删 + 云端也无 —— 已删干净的常态，不该当欠账报给用户。 */
+        localOnlyDeleted?: number;
+        /** enabled=false 时的原因（noToken / 网络错误）。 */
+        reason?: string;
+      };
+    };
+    /**
+     * 仅预览：本次将复制的会话对瘦身的抵消。
+     * 预览不真复制，复制体拿不到新 id、进不了保护名单，`planned` 偏大，故给此量化提示。
+     */
+    copyPlanned?: { total: number; hitCount: number; hitProjects: number };
+    error?: string;
+  };
 }
 
 export interface CheckinConfig {
@@ -582,7 +723,7 @@ export interface CreditStatistics {
   officialUsage?: CreditOfficialUsage;
 }
 
-export interface TokenStatsTotals { total: number; input: number; output: number; cacheRead: number; cacheWrite: number; uncachedInput: number; records: number; cacheHitRate: number | null; }
+export interface TokenStatsTotals { total: number; input: number; output: number; cacheRead: number; cacheWrite: number; uncachedInput: number; records: number; cacheHitRate: number | null; avgInputPerRecord: number | null; }
 export interface TokenStatsGroup extends TokenStatsTotals { key: string; title?: string | null; project?: string; sessionId?: string; }
 /** 一次模型调用的明细行；`total = input + output + cacheWrite`，`uncachedInput = max(0, input - cacheRead)`，`thinking` 是 `output` 中思考过程的 token 数（回复内容 = max(0, output - thinking)），均与聚合口径一致。 */
 export interface TokenStatsRequestRow { timestamp: number; model: string; project: string; sessionId: string; title?: string | null; input: number; output: number; cacheRead: number; cacheWrite: number; uncachedInput: number; thinking: number; total: number; }

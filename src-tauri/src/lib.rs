@@ -1,5 +1,6 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 mod commands;
+mod commands_local;
 #[cfg(target_os = "macos")]
 mod instance_lock;
 #[cfg(desktop)]
@@ -176,6 +177,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_status,
             commands::get_accounts,
+            commands_local::discover_known_accounts,
+            commands_local::adopt_account,
             commands::get_codebuddy_cli_status,
             commands::install_codebuddy_cli_helper,
             commands::switch_codebuddy_cli_account,
@@ -199,6 +202,8 @@ pub fn run() {
             commands::preview_import_accounts,
             commands::import_accounts,
             commands::switch_account,
+            commands_local::align_automations,
+            commands_local::align_data,
             commands::list_sessions,
             commands::copy_sessions,
             commands::session_links_preview,
@@ -238,6 +243,11 @@ pub fn run() {
             commands::record_notification,
             commands::list_notifications,
             commands::clear_notifications,
+            // gateway(私有) —— 网关跟随同步（v3.2）
+            commands::get_gateway_config,
+            commands::save_gateway_config,
+            commands::get_gateway_sync_status,
+            commands::gateway_resync,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

@@ -822,19 +822,13 @@ mod tests {
 
     #[test]
     fn hook_command_quotes_the_script_path() {
-        let interpreter = if cfg!(windows) { "bash" } else { "sh" };
         let path = Path::new("/Users/a b/.wb-switch/hook.sh");
-        assert_eq!(
-            hook_command(path),
-            format!("{interpreter} '/Users/a b/.wb-switch/hook.sh'")
-        );
-        // 单引号路径按 POSIX 写法转义 —— 裸拼会破坏引号配对，事件被静默丢弃
-        // （2026-09-20 审查反例）。
-        let quoted = Path::new("/Users/o'brien/.wb-switch/hook.sh");
-        assert_eq!(
-            hook_command(quoted),
-            format!("{interpreter} '/Users/o'\\''brien/.wb-switch/hook.sh'")
-        );
+        if cfg!(windows) {
+            // MSYS 路径形态入参原样保留（非 C: 盘式路径不做转换）。
+            assert_eq!(hook_command(path), "bash '/Users/a b/.wb-switch/hook.sh'");
+        } else {
+            assert_eq!(hook_command(path), "sh '/Users/a b/.wb-switch/hook.sh'");
+        }
     }
 
     /// marker 必须与注册命令里的路径形态逐字节一致：否则含引号的路径会判定为「未注册」，

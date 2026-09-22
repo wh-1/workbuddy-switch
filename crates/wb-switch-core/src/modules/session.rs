@@ -4,6 +4,7 @@
 //! `_find_project_jsonl` / `copy_session_to_user` / `_register_edge_sync_mapping` /
 //! `copy_sessions_for_switch` / `backup_workbuddy_db` / `workbuddy_db_path`。
 //!
+//! 硬链接共享（autoLink）已拆至 `session_share.rs`。
 //! WorkBuddy 5.x 数据三件套（缺一不可）：
 //!   1) 正文：`~/.workbuddy/projects/{workspace}/{cid}.jsonl`（JSONL 含 sessionId 字段）
 //!   2) 元数据：`~/.workbuddy/workbuddy.db` sessions 表（id = conversation id = UUID）
@@ -324,14 +325,14 @@ fn account_uid(account: &Value) -> String {
 }
 
 /// WorkBuddy 侧栏展示名：优先 custom_title（用户改名 / 定时任务名），否则 title。
-fn session_display_title(title: Option<String>, custom_title: Option<String>) -> String {
+pub(crate) fn session_display_title(title: Option<String>, custom_title: Option<String>) -> String {
     nonempty_text(custom_title)
         .or_else(|| nonempty_text(title))
         .unwrap_or_else(|| "(无标题)".to_string())
 }
 
 /// Claw 是账号绑定的 IM 渠道工作区，复制会话行不够，目标账号也用不了。
-fn is_claw_workspace(cwd: &str) -> bool {
+pub(crate) fn is_claw_workspace(cwd: &str) -> bool {
     cwd.trim()
         .trim_end_matches(['/', '\\'])
         .rsplit(['/', '\\'])
@@ -416,7 +417,7 @@ fn list_sessions_for_user_at(paths: &SessionPaths, uid: &str) -> Value {
 }
 
 /// 在 `{档位数据根}/projects/{workspace}/{cid}.jsonl` 定位会话正文。
-fn find_project_jsonl(paths: &SessionPaths, cid: &str) -> Option<PathBuf> {
+pub(crate) fn find_project_jsonl(paths: &SessionPaths, cid: &str) -> Option<PathBuf> {
     let projects = paths.projects_dir();
     if !projects.is_dir() {
         return None;
@@ -441,7 +442,7 @@ fn find_project_jsonl(paths: &SessionPaths, cid: &str) -> Option<PathBuf> {
 ///
 /// 任何一步失败都返回 Err——不能沿用「忽略 copy 错误后仍宣称备份成功」的旧行为，
 /// 备份不可信时后续数据库写入必须先停下来（design §1）。
-fn backup_workbuddy_db(paths: &SessionPaths, backup_root: &Path) -> Result<PathBuf, String> {
+pub(crate) fn backup_workbuddy_db(paths: &SessionPaths, backup_root: &Path) -> Result<PathBuf, String> {
     let db = paths.workbuddy_db();
     if !db.is_file() {
         return Err("会话数据不存在，未复制".to_string());
@@ -467,7 +468,7 @@ fn backup_workbuddy_db(paths: &SessionPaths, backup_root: &Path) -> Result<PathB
 
 /// 数据库插入结果：`No*` 与 `SourceRowMissing` 都不允许被当成成功。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DbCopyOutcome {
+pub(crate) enum DbCopyOutcome {
     Inserted,
     SourceRowMissing,
     NoSessionsTable,
@@ -490,7 +491,7 @@ fn session_row_owner(paths: &SessionPaths, cid: &str) -> Option<String> {
 /// 在 workbuddy.db 中把源会话行复制为新 id（动态列，覆盖 id/user_id/时间戳）。
 ///
 /// 与旧实现不同：db/表/源行缺失都显式返回，不再静默 Ok。
-fn insert_session_copy(
+pub(crate) fn insert_session_copy(
     paths: &SessionPaths,
     new_cid: &str,
     cid: &str,
@@ -614,6 +615,36 @@ fn register_edge_sync_mapping(
         Ok(_) => MappingOutcome::Registered,
         Err(error) => MappingOutcome::Unavailable(format!("云端映射登记失败：{error}")),
     }
+}
+
+/// 我方兼容包装：映射库路径走 `latest_mapping_db` 代次探测（v4→v3→v2 取最新）。
+///
+/// ⚠️ 上游 `register_edge_sync_mapping` 用 `SessionPaths::edge_sync_db` 写死 v2 ——
+/// 但 v3 曾短暂存在，写死会把归属登记进 App 不再读取的旧库（HANDOFF 坑 40 / 红线 65）。
+/// `session_share` 的共享登记必须走本函数。返回 true = 登记成功。
+pub(crate) fn register_edge_sync_mapping_probed(
+    variant: WbVariant,
+    new_cid: &str,
+    target_uid: &str,
+) -> bool {
+    // 上游 99aa5da 后 edge_sync_db_path 带 root 参数（扫描发现最大版本），
+    // 注册侧探测与读取侧共用同一套发现逻辑，不再单独走 latest_mapping_db。
+    let db_path = edge_sync_db_path(&variant.data_root(), variant);
+    if !db_path.is_file() {
+        return false;
+    }
+    let Some(conn) = open_db(&db_path, false) else {
+        return false;
+    };
+    if !table_exists(&conn, "edge_sync_mapping") {
+        return false;
+    }
+    let result = conn.execute(
+        "INSERT OR REPLACE INTO edge_sync_mapping \
+         (session_id, conversation_id, msg_channel, created_at) VALUES (?1, ?2, ?3, ?4)",
+        rusqlite::params![new_cid, new_cid, format!("convmsg:{target_uid}"), now_secs()],
+    );
+    result.is_ok()
 }
 
 /// 目标会话是否已按预期登记在云端映射表（恢复跳过重放时只核验，不 INSERT）。

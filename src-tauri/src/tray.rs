@@ -738,9 +738,14 @@ fn format_checkin_tooltip(value: &Value) -> String {
 mod tests {
     use super::{
         format_checkin_tooltip, is_silent_startup, should_activate_on_second_launch,
-        should_keep_tray_alive, should_wake_main_window, tray_icon, tray_icon_variant, MouseButton,
+        should_keep_tray_alive, should_wake_main_window, tray_icon_variant, MouseButton,
         MouseButtonState, TrayIconVariant,
     };
+    #[cfg(windows)]
+    use super::taskbar_uses_light_theme;
+    // `tray_icon()` 只在 macOS / Linux 的测试里被调用，Windows 侧 import 会报 unused。
+    #[cfg(not(windows))]
+    use super::tray_icon;
     use serde_json::json;
 
     #[test]

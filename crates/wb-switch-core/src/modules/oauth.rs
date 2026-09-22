@@ -261,6 +261,14 @@ pub async fn oauth_poll(login_id: &str) -> Value {
         }
     };
 
+    // gateway(私有) —— 跟随模式：登录入库后跟随「当前登录号」同步网关（新号若即
+    // 当前号则写入其凭证，否则幂等跳过）。失败不阻断登录，进 pending 由后续路径补偿。
+    {
+        let sync_result =
+            crate::modules::gateway_sync::sync_gateway_credentials_for(None, "login");
+        eprintln!("[gateway-sync] login: {sync_result}");
+    }
+
     let result = account::account_meta(&account);
     let mut map = oauth_states().lock().unwrap();
     if let Some(info) = map.get_mut(login_id) {

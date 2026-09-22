@@ -142,6 +142,11 @@ pub async fn refresh_account_token(mut account: Value) -> Value {
             previous_access_token.as_deref(),
         );
     }
+    // gateway(私有) —— 跟随模式：刷新后同步「跟随源当前号」（CLI 优先，内部判定 +
+    // 指纹幂等：被刷账号不是跟随源时写跟随源旧凭证自动跳过；是则写新凭证纠漂）。
+    {
+        let _ = crate::modules::gateway_sync::sync_gateway_credentials_for(None, "refresh");
+    }
     account
 }
 

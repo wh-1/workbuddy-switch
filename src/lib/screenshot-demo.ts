@@ -413,7 +413,7 @@ function rotateLogs(): RotateLog[] {
 }
 
 function demoTokenTotals(input: number, output: number, cacheRead: number, cacheWrite: number, records: number): TokenStatsTotals {
-  return { total: input + output + cacheWrite, input, output, cacheRead, cacheWrite, uncachedInput: Math.max(0, input - cacheRead), records, cacheHitRate: input > 0 ? cacheRead / input : null };
+  return { total: input + output + cacheWrite, input, output, cacheRead, cacheWrite, uncachedInput: Math.max(0, input - cacheRead), records, cacheHitRate: input > 0 ? cacheRead / input : null, avgInputPerRecord: records > 0 ? input / records : null };
 }
 
 function demoTokenGroup(key: string, input: number, output: number, cacheRead: number, cacheWrite: number, records: number): TokenStatsGroup {
@@ -549,6 +549,22 @@ export function screenshotDemoResponse(command: string, args?: Record<string, un
         : { ...appStatus, variant };
     }
     case "get_accounts": return { accounts: demoAccounts };
+    case "discover_known_accounts":
+      return {
+        accounts: demoAccounts.map((account) => ({
+          uid: account.uid,
+          nickname: account.nickname,
+          email: account.email,
+          source: "auth-history",
+          backupFiles: 3,
+          backedUpAt: futureAt(-1, 21, 0),
+          inAccountList: true,
+          accessTokenExpiresAt: account.expiresAt,
+          refreshTokenExpiresAt: account.refreshExpiresAt,
+          restorable: true,
+        })),
+      };
+    case "adopt_account": return { ok: true, account: demoAccounts[0] };
     case "get_codebuddy_cli_status": return cliStatus;
     // 让演示里存在一个「CodeBuddy IDE 当前账号」：否则 IDE 标记与选中态染色（淡紫）在演示里永远不可见。
     // 取第二个账号，使三张卡各自演示一种形态（A 占位行 / B IDE 选中 / C 查看全部）。

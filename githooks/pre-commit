@@ -1,0 +1,22 @@
+#!/bin/sh
+# w-dev 项目守卫钩子（规范：D:\w-dev\common\repo-discipline\README.md）
+# 启用：git config core.hooksPath githooks
+# 绕过：git commit --no-verify（不建议）
+cd "$(git rev-parse --show-toplevel)" || exit 1
+
+GUARD="D:/w-dev/common/repo-discipline/scripts/repo-guard.py"
+[ -f "$GUARD" ] || exit 0
+
+PY=python
+command -v "$PY" >/dev/null 2>&1 || PY=py
+command -v "$PY" >/dev/null 2>&1 || { echo "[guard] 未找到 python，跳过检查"; exit 0; }
+
+if ! "$PY" "$GUARD" --staged; then
+  echo ""
+  echo "============================================================"
+  echo "[repo-guard] 项目合规检查未通过 → 提交已拒绝"
+  echo "修完再提交；确需绕过：git commit --no-verify"
+  echo "存量违规可在 .repo-guard-ignore 中显式豁免（整改后删除）"
+  echo "============================================================"
+  exit 1
+fi

@@ -68,6 +68,10 @@ impl Totals {
     fn value(&self) -> Value {
         let cache_hit_rate =
             (self.usage.input > 0).then(|| self.usage.read as f64 / self.usage.input as f64);
+        // 每次调用的平均输入。命中率只说明「已付的输入没被重复计价」，真正的成本靶点
+        // 是这个数：它包含每轮都要重发的前缀（system / 指令 / 工具定义）与上下文。
+        let avg_input_per_record = (self.records > 0)
+            .then(|| self.usage.input as f64 / self.records as f64);
         // `input` already includes cache reads; expose the same headline total
         // used by the dashboard without double-counting the cached portion.
         let total = usage_total(self.usage);
@@ -80,6 +84,7 @@ impl Totals {
             "uncachedInput": self.usage.input.saturating_sub(self.usage.read),
             "records": self.records,
             "cacheHitRate": cache_hit_rate,
+            "avgInputPerRecord": avg_input_per_record,
         })
     }
 }
@@ -995,6 +1000,32 @@ pub fn get_statistics(days: Option<i64>) -> Value {
     })
 }
 
+/// 本地新增：与 [`get_statistics`] 完全相同的采集与口径，但接受**显式 cutoff**，
+/// 用于 7/30/90 白名单之外的时间窗（如「今日」）。
+///
+/// 刻意不复用 `get_statistics` 的代码、也不改动它一行 —— 让上游文件保持逐字原样，
+/// 把本地改动限制成「纯新增函数」，压缩与上游合并时的冲突面。
+pub fn get_statistics_since(cutoff: Option<i64>) -> Value {
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let generated_at = crate::modules::config::now_ms();
+    let range_days = cutoff.map(|value| (generated_at - value) / 86_400_000);
+    let ide_projects = ide_project_by_session();
+    json!({
+        "generatedAt": generated_at,
+        "rangeDays": range_days,
+        "sources": [
+            source(home.join(".workbuddy/projects"), "workbuddy", cutoff, false),
+            source(home.join(".codebuddy/projects"), "codebuddy-cli", cutoff, false),
+            ide_source(
+                codebuddy_extension_data_dir(),
+                "codebuddy-ide",
+                cutoff,
+                &ide_projects,
+            ),
+        ],
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1126,6 +1157,31 @@ mod tests {
                 write: 0,
             })
         );
+    }
+
+    #[test]
+    fn value_reports_average_input_per_record() {
+        // 没有记录时不给平均值，避免除零编造出一个 0
+        assert_eq!(Totals::default().value()["avgInputPerRecord"], Value::Null);
+
+        let mut totals = Totals::default();
+        totals.add(Usage {
+            input: 100,
+            output: 10,
+            read: 90,
+            write: 1,
+        });
+        totals.add(Usage {
+            input: 300,
+            output: 20,
+            read: 100,
+            write: 0,
+        });
+
+        let value = totals.value();
+        assert_eq!(value["records"], 2);
+        assert_eq!(value["avgInputPerRecord"], 200.0);
+        assert_eq!(value["cacheHitRate"], 190.0_f64 / 400.0);
     }
 
     #[test]
