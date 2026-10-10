@@ -53,6 +53,7 @@ const COMPACT_AFTER_BYTES: u64 = 1024 * 1024;
 /// watcher 轮询间隔：一次 `stat`，hook 事件要求秒级可见（AC1）。
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 
+
 /// 模型字段的未知哨兵值（与 IDE 解析同一套）：不得作为模型名展示。
 const MODEL_SENTINELS: [&str; 3] = ["auto", "undefined", "null"];
 
@@ -72,6 +73,13 @@ struct StoredEntry {
     reset_at: i64,
     first_seen_at: i64,
     hit_count: u32,
+    /// 该条目最近一次计入的 429 请求时刻（requestId 解码；`None` = 文案无身份段）。
+    ///
+    /// ★回显防护（P1，2026-09-25）：会话恢复/复述会把**同一条** 429 文案再发一遍，
+    /// merge 时若 request_at 相同 = 同一请求的回声，不累加 hit_count（真实的新 429
+    /// 有新的 requestId，时刻必然不同）。
+    #[serde(default)]
+    last_request_at: Option<i64>,
 }
 
 /// 后端持有的状态：事件文件已读偏移 + 当前有效的限额条目。
@@ -85,6 +93,40 @@ struct State {
 }
 
 static STATE: Mutex<Option<State>> = Mutex::new(None);
+
+/// 状态文件上次被本进程**读或写**时的 `(mtime 纳秒, size)` 快照。
+///
+/// ★外部编辑检测（P1，2026-09-25 根治「假条目复活」）：switch 侧文件即真源，用户可以
+/// 直接改状态文件（删假条目）。内存态若无条件整体写回，会把外部清理结果覆盖掉（09-22
+/// 实证，当时靠"杀 GUI → 改文件 → 重启"绕开）。对策：每次拿锁先 stat 文件，与快照
+/// 比对——不一致 = 外部改过 ⇒ **以文件为准重载**内存态；本进程自己的写入也走
+/// [`save_state`] 统一刷新快照，不会误判。
+static STATE_FILE_STAT: Mutex<Option<(u128, u64)>> = Mutex::new(None);
+
+fn stat_of(path: &Path) -> Option<(u128, u64)> {
+    let metadata = std::fs::metadata(path).ok()?;
+    let modified = metadata.modified().ok()?;
+    let since_epoch = modified.duration_since(std::time::UNIX_EPOCH).ok()?;
+    Some((since_epoch.as_nanos(), metadata.len()))
+}
+
+/// 拿到状态后调用：文件被外部改动（mtime/size 变化、被删）⇒ 以文件为准重载。
+///
+/// 必须在持有 `STATE` 锁的前提下调用（`guard` 就是它）。
+fn sync_state_with_disk(guard: &mut Option<State>, path: &Path) {
+    let current = stat_of(path);
+    let mut snapshot = STATE_FILE_STAT.lock().unwrap();
+    let stale = match (&*guard, &current) {
+        // 文件被外部删除 = 用户清空台账：以"空"为准
+        (Some(_), None) => true,
+        (Some(_), Some(cur)) => snapshot.as_ref() != Some(cur),
+        (None, _) => false, // 首次加载走 get_or_insert_with，这里无事可做
+    };
+    if stale {
+        *guard = Some(load_state(path));
+    }
+    *snapshot = current;
+}
 
 pub fn state_path() -> PathBuf {
     store_dir().join(STATE_FILE_NAME)
@@ -104,7 +146,10 @@ fn save_state(path: &Path, state: &State) -> std::io::Result<()> {
     atomic_write(
         path,
         &serde_json::to_string_pretty(state).unwrap_or_default(),
-    )
+    )?;
+    // 自己写的也算"已知状态"：刷新快照，避免下一轮把自家写入误判成外部改动。
+    *STATE_FILE_STAT.lock().unwrap() = stat_of(path);
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -187,10 +232,19 @@ fn request_time_of(message: &str) -> Option<i64> {
 }
 
 /// 一行 payload → 限额事件；非限额行、解析失败、缺恢复时刻统一返回 None（静默忽略）。
+///
+/// ★回显防护（P1，2026-09-25）：429 文案会被**二次转述**——助手消息里引用上一轮报错
+/// （`> 429 …`）、或同一条消息里出现两份完整限额文案（工具回显 + 助手复述）。转述不是
+/// 新的 429，入账会造成假条目 / hit_count 虚高。两类形态在此就地丢弃：
+/// ① 引用前缀行（block-quote 开头）；② 同一恢复时刻在**一条消息**里出现 ≥2 次
+/// （真实 429 文案的恢复时刻只出现一次，见 limits.rs 的 canonical 样例）。
 fn parse_quota_line(line: &str) -> Option<QuotaEvent> {
     let payload: HookPayload = serde_json::from_str(line.trim()).ok()?;
     // 限额文案在 `last_assistant_message` 里；`FinalStop` 等没有该字段的事件行直接忽略。
     let message = payload.last_assistant_message.as_deref()?;
+    if message.trim_start().starts_with('>') {
+        return None; // 引用前缀行：助手在转述上一轮报错，不是本轮的 429
+    }
     if !limits::QUOTA_MARKERS
         .iter()
         .any(|marker| message.contains(marker))
@@ -199,6 +253,12 @@ fn parse_quota_line(line: &str) -> Option<QuotaEvent> {
     }
     // 取不到官方恢复时刻就不是可入账的限额事件（不猜时间）。
     let reset_at = limits::parse_reset_at(message)?;
+    // 同一条消息里同一恢复时刻出现 ≥2 次 = 回显（工具回显 + 复述），非单一真实事件。
+    if let Some(anchor) = limits::reset_anchor_text(message) {
+        if message.matches(&anchor).count() > 1 {
+            return None;
+        }
+    }
     // 模型直接采用**本次 payload** 的字段：它是 429 当轮客户端侧选定的模型，
     // 与失败请求同轮（不读 transcript 全文猜模型 —— 延迟消费时那段文本已经属于
     // 之后的轮次，会给出别的模型，2026-09-19 实证假 chip）。
@@ -506,6 +566,8 @@ fn complete_lines(bytes: &[u8]) -> (Vec<String>, u64) {
     (lines, consumed)
 }
 
+
+
 /// 把一批行入账到状态；返回是否新增了条目。
 fn ingest_lines(ctx: &IngestContext, state: &mut State, lines: &[String], now: i64) -> bool {
     let mut added = false;
@@ -527,6 +589,7 @@ fn ingest_lines(ctx: &IngestContext, state: &mut State, lines: &[String], now: i
                 reset_at: event.reset_at,
                 first_seen_at: now,
                 hit_count: 1,
+                last_request_at: event.request_at,
             },
         );
         added = true;
@@ -537,15 +600,30 @@ fn ingest_lines(ctx: &IngestContext, state: &mut State, lines: &[String], now: i
     added
 }
 
-/// 同一次事件（同账号 + 同模型 + 同恢复时刻）只保留一条，命中行数累加。
+/// 同一次限流事件（同账号 + 同恢复时刻）只保留一条，命中行数累加。
+///
+/// ★ 不去重 `model`：用户切走后客户端可能以「切换后的模型」再发一次 Stop/FinalStop
+/// （同一账号共享额度，切换后首请求仍落在同一限流窗口），把同一次限流按模型拆成两条，
+/// 会误报「切换后的模型也被限」（2026-10-09 实证：b2eca239 真实被限的是
+/// deepseek-v4.1-flash，切到 hy3 后续用，卡片却误报 hy3 限额）。模型保留**首次入列**的那条
+/// （触发限流时客户端写下的模型），后续切换的模型只累加命中、不覆盖模型名。
+///
+/// ★回显防护：`last_request_at` 相同（含双方 `None` 以外的同值）= 同一请求的复述，
+/// 不累加 hit_count；文案无身份段（`None`）保持原行为照常累加。
 fn merge_entry(events: &mut Vec<StoredEntry>, entry: StoredEntry) {
     if let Some(existing) = events.iter_mut().find(|existing| {
-        existing.account_id == entry.account_id
-            && existing.model == entry.model
-            && existing.reset_at == entry.reset_at
+        existing.account_id == entry.account_id && existing.reset_at == entry.reset_at
     }) {
+        if existing.last_request_at.is_some()
+            && existing.last_request_at == entry.last_request_at
+        {
+            return; // 同一请求的回声：不计新命中
+        }
         existing.hit_count += entry.hit_count;
         existing.first_seen_at = existing.first_seen_at.min(entry.first_seen_at);
+        if entry.last_request_at.is_some() {
+            existing.last_request_at = entry.last_request_at;
+        }
         return;
     }
     events.push(entry);
@@ -634,7 +712,10 @@ pub(crate) fn consume_pending() -> bool {
     let events = rate_limit_hook::events_path();
     let state_file = state_path();
     let mut guard = STATE.lock().unwrap();
-    let state = guard.get_or_insert_with(|| load_state(&state_file));
+    guard.get_or_insert_with(|| load_state(&state_file));
+    // 外部编辑检测：文件被外部改过 ⇒ 以文件为准重载（防内存态写回覆盖外部清理）
+    sync_state_with_disk(&mut guard, &state_file);
+    let state = guard.as_mut().unwrap();
     // 快速路径：一次 stat，没有新字节就直接返回（watcher 每秒走这里）。
     if !has_pending_bytes(&events, state.offset) {
         return false;
@@ -648,20 +729,25 @@ pub(crate) fn consume_pending() -> bool {
 /// 查询路径也能拿到最新状态。
 pub(crate) fn hook_entries(now: i64) -> Vec<Resolved> {
     let _ = consume_pending();
+    let state_file = state_path();
     let mut guard = STATE.lock().unwrap();
-    let state = guard.get_or_insert_with(|| load_state(&state_path()));
-    live_entries(state, now)
+    guard.get_or_insert_with(|| load_state(&state_file));
+    sync_state_with_disk(&mut guard, &state_file);
+    live_entries(guard.as_mut().unwrap(), now)
 }
 
 /// 最近一次入账的 hook 限额事件时刻（诊断用）。
 pub fn last_event_at() -> Option<i64> {
-    {
-        let guard = STATE.lock().unwrap();
+    let state_file = state_path();
+    let mut guard = STATE.lock().unwrap();
+    if guard.is_some() {
+        sync_state_with_disk(&mut guard, &state_file);
         if let Some(state) = guard.as_ref() {
             return state.last_event_at;
         }
     }
-    load_state(&state_path()).last_event_at
+    drop(guard);
+    load_state(&state_file).last_event_at
 }
 
 /// 启动 watcher：轮询事件文件，有新条目时回调（宿主据此 emit `rate-limits-updated`）。
@@ -704,6 +790,56 @@ mod tests {
 
     /// 本机实测的陈旧 429 文案的恢复时刻原文（2026-09-21 19:30，见 research 文档）。
     const STALE_RESET_TEXT: &str = "2026-09-22 15:06:49 UTC+8";
+
+    /// 反向验证（guard）：同一次限流窗口（同账号 + 同恢复时刻）无论 model 是否不同，
+    /// 都必须合并成一条，且模型保留首次入列的那条（触发限流的真实模型），不被用户切换后的
+    /// 模型覆盖。否则会误报「切换后的模型也被限」（2026-10-09 b2eca239 实证：deepseek 被限、
+    /// 切到 hy3 后续用，卡片却误报 hy3 限额）。
+    #[test]
+    fn same_account_reset_collapses_distinct_models_into_one_entry() {
+        let reset = 1_791_529_894_000; // 2026-10-09 15:11:34 UTC+8
+        let mut events: Vec<StoredEntry> = vec![StoredEntry {
+            account_id: "645ce17e".to_string(),
+            model: Some("deepseek-v4.1-flash".to_string()),
+            reset_at: reset,
+            first_seen_at: 1,
+            hit_count: 1,
+            last_request_at: Some(100),
+        }];
+        // 切换后的模型、同一次请求（last_request_at 相同）→ 回声：不新增、不覆盖模型。
+        merge_entry(
+            &mut events,
+            StoredEntry {
+                account_id: "645ce17e".to_string(),
+                model: Some("hy3".to_string()),
+                reset_at: reset,
+                first_seen_at: 2,
+                hit_count: 1,
+                last_request_at: Some(100),
+            },
+        );
+        assert_eq!(events.len(), 1, "同账号+同resetAt 只保留一条");
+        assert_eq!(events[0].model.as_deref(), Some("deepseek-v4.1-flash"));
+        // 不同请求（不同 last_request_at）同一窗口 → 仍合并为一条、命中累加、模型不覆盖。
+        merge_entry(
+            &mut events,
+            StoredEntry {
+                account_id: "645ce17e".to_string(),
+                model: Some("hy3".to_string()),
+                reset_at: reset,
+                first_seen_at: 3,
+                hit_count: 1,
+                last_request_at: Some(200),
+            },
+        );
+        assert_eq!(events.len(), 1, "不同请求仍合并为一条");
+        assert_eq!(
+            events[0].model.as_deref(),
+            Some("deepseek-v4.1-flash"),
+            "模型不被切换后的覆盖"
+        );
+        assert_eq!(events[0].hit_count, 2);
+    }
 
     /// 按毫秒生成 32 位十六进制的 UUIDv7 `requestId`：前 12 位十六进制 = 毫秒时刻，
     /// version nibble `7`、variant `0b10`（与真实文案同形，见 research 文档）。
@@ -1226,7 +1362,7 @@ mod tests {
         assert_eq!(consume_with(&ctx, &mut reloaded, T0 + 2_000), None);
         assert_eq!(reloaded.events.len(), 1);
 
-        // 同一次事件的重复书写（重试轮）：hitCount 累加、不新增条目。
+        // 同一请求的重复书写（会话恢复复述、requestId 相同）：★回显防护 → 不累加。
         fixture.append(&[stop_payload(
             session,
             "deepseek-v4.1-flash",
@@ -1236,7 +1372,21 @@ mod tests {
         let mut again = fixture.state();
         assert_eq!(consume_with(&ctx, &mut again, T0 + 3_000), Some(true));
         assert_eq!(again.events.len(), 1);
-        assert_eq!(again.events[0].hit_count, 2);
+        assert_eq!(
+            again.events[0].hit_count, 1,
+            "同一 requestId 的回声不计新命中"
+        );
+
+        // 真实重试 = 新请求（requestId / 时刻不同）：hitCount 照常累加。
+        fixture.append(&[stop_payload(
+            session,
+            "deepseek-v4.1-flash",
+            &fixture.cli_transcript(session),
+            Some(T0 + 1_500),
+        )]);
+        assert_eq!(consume_with(&ctx, &mut again, T0 + 4_000), Some(true));
+        assert_eq!(again.events.len(), 1);
+        assert_eq!(again.events[0].hit_count, 2, "新请求照常累加");
     }
 
     /// 本案时间线（research/2026-09-17-misattribution-evidence.md，本机实测，CST）。
@@ -1722,6 +1872,70 @@ mod tests {
         assert_eq!(state.events[0].account_id, "acc-session");
     }
 
+    /// ★回显防护：引用前缀行 / 同消息重复文案 → 丢弃，不入账。
+    #[test]
+    fn echoed_quota_messages_are_dropped() {
+        let transcript = Path::new("/x/.workbuddy/projects/s.jsonl");
+        let payload = |message: &str| {
+            json!({
+                "transcript_path": transcript.to_string_lossy(),
+                "session_id": "s-1",
+                "model": "hy3",
+                "last_assistant_message": message,
+            })
+            .to_string()
+        };
+        let genuine = quota_message(QUOTA_RESET_TEXT, Some(T0 + 900));
+        assert!(parse_quota_line(&payload(&genuine)).is_some(), "真事件照常入账");
+
+        // 引用前缀行（block-quote 转述上一轮报错）
+        let quoted = format!("> {genuine}");
+        assert!(
+            parse_quota_line(&payload(&quoted)).is_none(),
+            "引用前缀行丢弃"
+        );
+
+        // 同一条消息里恢复时刻出现两次（工具回显 + 复述）
+        let doubled = format!("{genuine}\n\n上一轮的报错是：{genuine}");
+        assert!(
+            parse_quota_line(&payload(&doubled)).is_none(),
+            "同消息重复文案丢弃"
+        );
+    }
+
+    /// ★外部编辑检测：状态文件被外部改动 ⇒ 以文件为准重载内存态（防写回覆盖外部清理）。
+    #[test]
+    fn external_state_edit_is_reloaded_from_file() {
+        let path = std::env::temp_dir().join(format!(
+            "wb-switch-rlstate-{}.json",
+            uuid::Uuid::new_v4().simple()
+        ));
+        // 内存态有一条假条目，先落盘建立快照
+        let mut guard = Some(State {
+            offset: 0,
+            last_event_at: None,
+            events: vec![StoredEntry {
+                account_id: "a".to_string(),
+                model: Some("hy3".to_string()),
+                reset_at: 9_999_999_999_999,
+                first_seen_at: 1,
+                hit_count: 1,
+                last_request_at: None,
+            }],
+        });
+        save_state(&path, guard.as_ref().unwrap()).unwrap();
+        // 外部清理：直接改文件删掉条目
+        std::fs::write(&path, r#"{"offset":0,"events":[]}"#).unwrap();
+        // 快照必须锚定在外部改动**之前**的文件状态上（模拟真实时序：内存态是旧读取）
+        *STATE_FILE_STAT.lock().unwrap() = None;
+        sync_state_with_disk(&mut guard, &path);
+        assert!(
+            guard.as_ref().unwrap().events.is_empty(),
+            "外部改动以文件为准重载，假条目不复活"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[test]
     fn entries_expire_at_their_reset_time() {
         let mut state = State {
@@ -1733,6 +1947,7 @@ mod tests {
                 reset_at: 1_500,
                 first_seen_at: 1_000,
                 hit_count: 1,
+                last_request_at: None,
             }],
         };
         assert_eq!(

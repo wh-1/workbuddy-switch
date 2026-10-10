@@ -1,9 +1,11 @@
+//! 账号切换：备份 → 关进程 → 复制会话/数据对齐（可选）→ 写认证 → 启动。
 //! 账号切换：备份 → 关进程 → 恢复/复制会话（可选）→ 写认证 → 启动。
 //!
 //! 对照 server.py `switch_account`。切换过程中通过进度回调向前端推送实时进度，
 //! 避免界面长时间无反馈被误认为卡死。core 不依赖 Tauri，进度回调由宿主适配
 //! （桌面端转发为 `switch-progress` 事件，HTTP 端写入轮询/SSE）。
 //!
+//! dry_run=true 为预览模式：只统计将发生的对齐变更，不关 App、不写库、不写凭据。
 //! 顺序要点（design §1）：互斥 → 关进程 → 恢复/复制/同步会话 → 写认证 → 启动。
 //! 复制与同步顺序调用、共用同一把档位操作锁，且在「关闭 App + 恢复未完成写入」之后
 //! 才执行；会话写入一律在 WorkBuddy 停止写入之后。普通会话操作失败不阻止认证切换，
@@ -21,15 +23,25 @@ use serde_json::{json, Value};
 use crate::modules::account;
 use crate::modules::auth_file;
 use crate::modules::process::{close_workbuddy, launch_workbuddy};
-use crate::modules::session::{self, SessionPaths, SyncSelection};
+use crate::modules::session::{self, SessionPaths};
 use crate::modules::session_link::{
     self, Operation, RecoveryReport, LOCK_BUSY_MESSAGE_PREFIX, LOCK_UNAVAILABLE_MESSAGE_PREFIX,
 };
+use crate::modules::renderer_refresh;
+use crate::modules::switch_flow;
 use crate::modules::variant::WbVariant;
 
 /// 切换进度回调（宿主注入，如 Tauri `app.emit` 或 HTTP 进度缓存）。
 pub type ProgressFn = Box<dyn Fn(&str) + Send + Sync>;
 
+/// 切换选项（本地扩展版，定义在 [`switch_flow`]；此处 re-export 保持
+/// `switch::SwitchOptions` 路径稳定，api/commands 无感）。
+pub use switch_flow::SwitchOptions;
+
+/// 切换账号。
+///
+/// 薄包装：调用 [`switch_account_inner`] 做实际切换，并把结果留痕到
+/// `~/.wb-switch/switch_logs.json`（见 `oplog` 模块）。留痕失败不影响切换结果。
 /// `restart=false` 携带会话写入意图时的拒绝文案（复制/同步各自一条）。
 pub const COPY_WITHOUT_RESTART_MESSAGE: &str =
     "本次切换未重启 WorkBuddy（restart=false），已拒绝会话复制请求；如需复制请勾选重启切换";
@@ -141,10 +153,18 @@ fn reject_session_writes_without_restart(
 pub fn switch_account(
     progress_fn: Option<&ProgressFn>,
     account_id: &str,
-    restart: bool,
-    share_sessions: bool,
-    copy_session_ids: &[String],
-    sync_selections: &[SyncSelection],
+    opts: &SwitchOptions,
+) -> Result<Value, String> {
+    let outcome = switch_account_inner(progress_fn, account_id, opts);
+    // 本地扩展：结果留痕（oplog）在 switch_flow，失败不影响切换本身。
+    switch_flow::log_switch_result(account_id, opts, &outcome);
+    outcome
+}
+
+fn switch_account_inner(
+    progress_fn: Option<&ProgressFn>,
+    account_id: &str,
+    opts: &SwitchOptions,
 ) -> Result<Value, String> {
     let progress = |message: &str| {
         eprintln!("[switch] progress: {message}");
@@ -158,12 +178,30 @@ pub fn switch_account(
         account::find_account(account_id).ok_or_else(|| format!("账号不存在: {account_id}"))?;
     // 档位以账号自身为准：签名里的参数无法表达「用 A 档位操作 B 档位账号」。
     let variant = account::variant_of(&acc);
+    // —— 本地扩展 shim：把结构体选项绑回上游历史参数名，函数体与上游逐字一致，
+    //    上游演进主体时不再因字段改名产生成片冲突 ——
+    let restart = opts.restart;
+    let share_sessions = opts.share_sessions;
+    let copy_session_ids = &opts.copy_session_ids;
+    let sync_selections = &opts.sync_selections;
+
+    // 预览模式：不关 App、不写库、不写凭据，只算对齐计划
+    // （含项目侧栏同步与会话瘦身——这两项是破坏性的，必须先可预览）
+    if opts.dry_run {
+        return switch_flow::dry_run_preview(&progress, &acc, variant, opts);
+    }
+
+    // 真实执行才备份 auth（预览零写盘，时点仍在关 App 之前）。
     let backup = auth_file::backup_auth_file(variant);
 
     let mut copy_report: Option<Value> = None;
+    let mut auto_link_report: Option<Value> = None;
+    let mut sid_rewrite_report: Option<Value> = None;
     let mut session_report: Option<Value> = None;
+    let mut align_report: Option<Value> = None;
     let mut sync_report: Option<Value> = None;
     let mut recovery_report: Option<Value> = None;
+    let mut renderer_cache_report: Option<Value> = None;
     if restart {
         progress("正在关闭 WorkBuddy…");
         close_workbuddy(variant, 20)?;
@@ -195,7 +233,11 @@ pub fn switch_account(
         } else {
             BTreeSet::new()
         };
-        if !copy_session_ids.is_empty() {
+        // 只有重启场景才做会话/数据操作（数据库在运行中不宜写入）
+        // 能力探测只对国际版生效：国内版数据根与改造前同构，探测会把「从未用过
+        // 会话」的国内版机器判成不支持并整段跳过（A1 零回归）。
+        let copy_available = variant != WbVariant::Ai || variant.supports_session_copy();
+        if !copy_session_ids.is_empty() && copy_available {
             progress("正在复制会话到目标账号…");
             // 复制失败本身只记进报告、不阻断切换；但若本次留下了未完成的写入，
             // 会在复制与同步都跑完后统一暂停切换与启动（见下方 pending 差集检查）。
@@ -240,10 +282,20 @@ pub fn switch_account(
                 },
             );
         }
+        // 本地专属编排（autoLink 增量共享 → 统一保留名单 → 项目对齐/瘦身 → 共享 sid
+        // 改写，时序铁律见 switch_flow::post_close_extras）整体住 switch_flow，
+        // 这里只保留挂钩点——上游演进切换主体时不会与本地逻辑冲突。
+        let post = switch_flow::post_close_extras(&progress, &acc, variant, opts, &copy_report);
+        auto_link_report = post.auto_link;
+        sid_rewrite_report = post.sid_rewrite;
+        align_report = post.align;
         if share_sessions {
             // 旧的「全体转移」兼容路径（默认关闭），Rust 版暂未实现
             session_report = Some(json!({"error": "share_sessions 兼容路径暂未在 Rust 版实现"}));
         }
+        // 渲染层账号键预写（实验开关 clearRendererCache）：预写登录 uid 与侧栏展开态，
+        // 重启后账号界面直接是目标号（2026-10-08 定稿，失败不阻断切号）。
+        renderer_cache_report = switch_flow::refresh_renderer_ui_hook(&progress);
         // 本次复制/同步新留下的未完成操作：不带着不一致的会话内容写认证并启动 App
         // （design §5 / R5）。未完成写入也不在这里被报告成成功——错误已在各自报告里，
         // 这里只决定「暂停」。未开始写入的失败（预览过期、源会话被删等）不产生操作记录，
@@ -273,8 +325,23 @@ pub fn switch_account(
     progress("正在写入认证文件…");
     auth_file::write_account_to_auth_file(&acc, variant)?;
     if restart {
+        // 渲染层账号刷新（私有扩展，2026-10-08）：开关开启时给 WorkBuddy 带随机本机调试
+        // 端口启动，切号后经 CDP 自动触发一次「点击账号」（渲染层懒加载，不触发就不刷新）。
+        let port = renderer_refresh::random_port();
+        std::env::set_var(renderer_refresh::DEBUG_PORT_ENV, port.to_string());
+        let refresh_port = Some(port);
         progress("正在启动 WorkBuddy…");
-        launch_workbuddy(variant, Some(&progress))?;
+        let launched = launch_workbuddy(variant, Some(&progress));
+        if let Some(port) = refresh_port {
+            std::env::remove_var(renderer_refresh::DEBUG_PORT_ENV);
+            if launched.is_ok() {
+                let name = account::account_display_name(&acc);
+                renderer_refresh::spawn_refresh_after_launch(port, name, move |result| {
+                    renderer_refresh::log_refresh_result(port, &result);
+                });
+            }
+        }
+        launched?;
     }
     progress("切换完成");
 
@@ -287,8 +354,17 @@ pub fn switch_account(
     if let Some(c) = copy_report {
         result["sessionCopy"] = c;
     }
+    if let Some(a) = auto_link_report {
+        result["autoLink"] = a;
+    }
+    if let Some(r) = sid_rewrite_report {
+        result["sidRewrite"] = r;
+    }
     if let Some(s) = session_report {
         result["sessionShare"] = s;
+    }
+    if let Some(a) = align_report {
+        result["alignData"] = a;
     }
     if let Some(s) = sync_report {
         result["sessionSync"] = s;
@@ -296,6 +372,14 @@ pub fn switch_account(
     if let Some(r) = recovery_report {
         result["sessionRecovery"] = r;
     }
+    if let Some(r) = renderer_cache_report {
+        result["rendererCache"] = r;
+    }
+    // gateway(私有) —— 跟随模式：同步「跟随源当前号」（CLI 优先，内部判定 + 指纹幂等）。
+    // App 切号目标 ≠ 跟随源时（四产品账号互不联动），这里只会幂等刷新 CLI 当前号，
+    // 不会把 App 的号顶进网关。失败不阻断切号（进 pending 补偿）。
+    result["gatewaySync"] =
+        crate::modules::gateway_sync::sync_gateway_credentials_for(None, "switch");
     Ok(result)
 }
 
@@ -306,6 +390,7 @@ mod tests {
     //! 与「restart=false 拒绝写入意图」三条判定。
 
     use super::*;
+
     use crate::modules::session_link::{
         save_operation, OpPhase, OperationMember, RecoveryIssue, TemporaryFileIssue,
         OPERATION_VERSION,

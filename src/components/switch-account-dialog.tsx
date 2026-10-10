@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { CircleAlert, ExternalLink, Loader2 } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
@@ -13,6 +13,14 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  AlignOptionsPanel,
+  formatAlignReport,
+  type PreviewGroup,
+  type PreviewItem,
+  type PreviewReport,
+  type PreviewState,
+} from "@/components/align-options";
 import { DialogAutoHeight } from "@/components/ui/dialog-auto-height";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -81,6 +89,17 @@ function dedupeTemporaryFiles(items: TemporaryFileInfo[]): TemporaryFileInfo[] {
 export function SwitchAccountDialog({ open, onOpenChange, account, onDone }: Props) {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loadingSessions, setLoadingSessions] = useState(false);
+  const [copySessions, setCopySessions] = useState(false);
+  const [alignAutomations, setAlignAutomations] = useState(true);
+  const [alignFiles, setAlignFiles] = useState(true);
+  const [slimSessions, setSlimSessions] = useState(true);
+  // 瘦身默认保留 1 条（2026-09-30 主人定稿：默认从 3 收紧到 1，KEEP_CHOICES 最小值即 1，不会全清）
+  const [slimKeep, setSlimKeep] = useState(1);
+  const [autoLink, setAutoLink] = useState(true);
+  const [preview, setPreview] = useState<PreviewState | null>(null);
+  const [previewing, setPreviewing] = useState(false);
+  /** 影响预览结果的输入版本号：动一次 +1，用于判断在途预览是否已经过时。 */
+  const previewSeq = useRef(0);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   /** 展开的节点：任务 / 空间 / 文件夹。默认全部收起。 */
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -120,10 +139,18 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone }: Pro
     };
   }, []);
 
-  // 立即打开弹框；首次绘制前重置旧内容，两个 tab 各自加载数据。
+  // 官方版：useLayoutEffect 重置 + 会话加载（cancelled 门控，兼容 permCheck/DialogAutoHeight）
+  // 私有：同处初始化 align/slim/copy/autoLink 开关（原另有一版 useEffect 重复加载，已合并至此，避免重复请求）
   useLayoutEffect(() => {
     if (!open || !accountId) return;
     let cancelled = false;
+    setCopySessions(false);
+    setAlignAutomations(true);
+    setAlignFiles(true);
+    setSlimSessions(true);
+    setSlimKeep(1);
+    setAutoLink(true);
+    setPreview(null);
     setSelected(new Set());
     setExpanded(new Set());
     setPermCheck(null);
@@ -150,6 +177,21 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone }: Pro
     // 关闭时只取消回写，保留内容到退出动画结束。
     return () => { cancelled = true; };
   }, [open, accountId, variant]);
+
+  // 预览是「按当前勾选算」的一次性快照：任一影响结果的输入一变，旧结果就作废。
+  // 只标脏不清空 —— 清空等于让用户白点一次；标脏还能对照看差在哪。
+  useEffect(() => {
+    previewSeq.current += 1;
+    setPreview((cur) => (cur && !cur.stale ? { ...cur, stale: true } : cur));
+  }, [
+    alignAutomations,
+    alignFiles,
+    slimSessions,
+    slimKeep,
+    autoLink,
+    copySessions,
+    selected,
+  ]);
 
   function toggleSession(id: string) {
     setSelected((prev) => {
@@ -190,11 +232,26 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone }: Pro
       const res = await api.switchAccount({
         accountId: account.id,
         copySessionIds: requestedCopy ? [...selected] : undefined,
+        alignAutomations: alignAutomations,
+        alignFiles: alignFiles,
+        slimKeep: slimSessions ? slimKeep : 0,
+        autoLink: autoLink,
         // 勾选绑定预览凭据；执行前后端会重新校验，版本变化则跳过该项。
         syncSelections: requestedSync ? syncSelections : undefined,
       });
       const nickname = displayName(account);
       const parts: string[] = [];
+      if (res.autoLink?.copied.length) {
+        const n = res.autoLink.copied.length;
+        const extras: string[] = [];
+        if (res.autoLink.alreadyCopied) extras.push(`${res.autoLink.alreadyCopied} 条本来就有`);
+        if (res.autoLink.beyondKeep) extras.push(`${res.autoLink.beyondKeep} 条超出范围，留在原账号`);
+        parts.push(
+          `已共享 ${n} 条会话` + (extras.length ? `（${extras.join("，")}）` : ""),
+        );
+      } else if (res.autoLink && !res.autoLink.copied.length && res.autoLink.alreadyCopied) {
+        parts.push("目标账号已有全部会话，本轮没有需要共享的");
+      }
       const copyReport = res.sessionCopy;
       const copiedCount = copyReport?.copied?.length ?? 0;
       const linkedCount = copyReport?.alreadyLinked?.length ?? 0;
@@ -209,7 +266,30 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone }: Pro
       if (syncedItems.length > 0) parts.push(`已同步 ${syncedItems.length} 个会话`);
       if (skippedItems.length > 0) parts.push(`跳过 ${skippedItems.length} 个会话`);
       if (syncErrors.length > 0) parts.push(`会话同步失败 ${syncErrors.length} 个`);
-      if (res.backup) parts.push(`备份: ${res.backup}`);
+      if (res.alignData?.automations) {
+        parts.push(`已带走 ${res.alignData.automations.updated} 个定时任务`);
+      }
+      if (res.alignData?.settings?.storage?.copied) {
+        parts.push(`已同步 ${res.alignData.settings.storage.copied} 个文件`);
+      }
+      if (res.alignData?.slim?.deleted) {
+        parts.push(`清理旧会话：收起 ${res.alignData.slim.deleted} 条`);
+      }
+      const sc = res.alignData?.slim?.cloud;
+      if (sc?.enabled) {
+        const removed = sc.removed ?? 0;
+        const gone = sc.alreadyGone ?? 0;
+        const total = sc.deleted ?? removed + gone;
+        if (total) {
+          parts.push(
+            gone
+              ? `云端清掉 ${total} 条`
+              : `云端删掉 ${removed || total} 条`,
+          );
+        }
+        if (sc.failed) parts.push(`有 ${sc.failed} 条云端没删掉，本地先留着，下次切号再试`);
+        if (sc.foreign) parts.push(`有 ${sc.foreign} 条属于其他账号，没动`);
+      }      if (res.backup) parts.push(`备份: ${res.backup}`);
       // 成功清理：临时备份已回收，不再展示可还原路径；待清理项单独提示，不写进成功文案。
       toast.success(`已切换至「${nickname}」`, {
         description: parts.length ? parts.join("；") : `${variantAppName(accountVariant(account))} 已重启为目标账号。`,
@@ -305,6 +385,82 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone }: Pro
     } finally {
       setBusy(false);
       setProgress("");
+    }
+  }
+
+  async function doPreview() {
+    if (!account) return;
+    setPreviewing(true);
+    setError("");
+    const seqAtStart = previewSeq.current;
+    try {
+      const res = await api.switchAccount({
+        accountId: account.id,
+        // 预览不真复制，但要把「将要复制的会话」传进去，用于量化瘦身的抵消条数
+        copySessionIds: copySessions ? [...selected] : undefined,
+        alignAutomations: alignAutomations,
+        alignFiles: alignFiles,
+        slimKeep: slimSessions ? slimKeep : 0,
+        autoLink: autoLink,
+        dryRun: true,
+      });
+      // 出结果之前设置又动过 ⇒ 这份已经不是当前勾选的结果，直接标脏，别让用户照着它按确认。
+      const stale = previewSeq.current !== seqAtStart;
+
+      const lead: PreviewGroup[] = [];
+      const al = res.autoLink;
+      if (al) {
+        const items: PreviewItem[] = [];
+        if (al.copied.length) {
+          items.push({ label: "共享会话", value: `${al.copied.length} 条` });
+          // 目标账号早就有的那份不算搬运量，但必须显示，否则用户以为「我只搬了 3 条」。
+          if (al.alreadyCopied) {
+            items.push({
+              label: "目标账号本来就有",
+              value: `${al.alreadyCopied} 条`,
+            });
+          }
+          if (al.beyondKeep) {
+            items.push({
+              label: "超出保留范围，留在原账号",
+              value: `${al.beyondKeep} 条`,
+            });
+          }
+        } else if (al.alreadyCopied) {
+          items.push({ label: "共享会话", value: `本来就有 ${al.alreadyCopied} 条` });
+        } else {
+          items.push({ label: "共享会话", value: "当前账号没有可共享的对话" });
+        }
+        lead.push({ title: "共享会话", items });
+      }
+
+      const report: PreviewReport = res.alignData
+        ? formatAlignReport(res.alignData)
+        : { groups: [{ items: [{ label: "这次没有要处理的数据" }] }] };
+      const shared = al?.copied.length ?? 0;
+      const summary = shared
+        ? [`共享会话 ${shared} 条`, report.summary].filter(Boolean).join(" · ")
+        : report.summary;
+
+      setPreview({
+        report: { summary, groups: [...lead, ...report.groups], footnote: report.footnote },
+        stale,
+      });
+    } catch (e) {
+      setPreview({
+        report: {
+          groups: [
+            {
+              tone: "error",
+              title: "出问题了",
+              items: [{ label: api.asError(e), tone: "error" }],
+            },
+          ],
+        },
+        stale: false,
+      });
+    } finally {
+      setPreviewing(false);
     }
   }
 
@@ -525,6 +681,19 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone }: Pro
             </Alert>
           )}
 
+          {/* 对齐选项：不随 tab 切换隐藏（自动化/文件/瘦身/共享都在本次切号时生效）。 */}
+          <AlignOptionsPanel
+            value={{ alignAutomations, alignFiles, slimSessions, slimKeep, autoLink }}
+            onChange={(next) => {
+              setAlignAutomations(next.alignAutomations);
+              setAlignFiles(next.alignFiles);
+              setSlimSessions(next.slimSessions);
+              setSlimKeep(next.slimKeep);
+              setAutoLink(next.autoLink);
+            }}
+            preview={preview}
+          />
+
           {linksAvailable ? (
             <Tabs
               value={tab}
@@ -579,6 +748,13 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone }: Pro
           <div className="flex shrink-0 gap-2">
             <Button variant="outline" onClick={() => onOpenChange(false)} disabled={busy}>
               取消
+            </Button>
+            <Button
+              variant="secondary"
+              onClick={doPreview}
+              disabled={busy || previewing || (!alignAutomations && !alignFiles && !slimSessions)}
+            >
+              {previewing ? "统计中…" : "预览一下"}
             </Button>
             <Button onClick={doSwitch} disabled={busy}>
               {busy ? "切换中…" : "确认切换"}

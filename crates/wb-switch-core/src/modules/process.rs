@@ -1199,7 +1199,16 @@ pub fn launch_workbuddy(variant: WbVariant, progress: Option<&dyn Fn(&str)>) -> 
                 ));
             }
             persist_workbuddy_exe(&exe, variant);
-            cmd_builder(&exe)
+            // 临时诊断设施（2026-10-08）：设 WB_SWITCH_REMOTE_DEBUG_PORT 环境变量时
+            // 给 WorkBuddy 带上 CDP 调试端口，供渲染层状态 dump（徽章/列表数据源实锤）。
+            // 未设置时零影响；实锤后此段连同变量一起移除。
+            let mut builder = cmd_builder(&exe);
+            if let Ok(port) = std::env::var("WB_SWITCH_REMOTE_DEBUG_PORT") {
+                if !port.trim().is_empty() {
+                    builder.arg(format!("--remote-debugging-port={}", port.trim()));
+                }
+            }
+            let _ = builder
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .spawn()

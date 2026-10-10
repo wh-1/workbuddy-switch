@@ -8,7 +8,10 @@ use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 
 use crate::modules::account::{build_auth_headers, upsert_account};
-use crate::modules::config::{http_request, load_checkin_config, norm_ts, now_ms, RunFlagGuard};
+use crate::modules::config::{
+    batch_gap, http_request, is_network_error, load_checkin_config, norm_ts, now_ms,
+    shuffle_by_seed, RunFlagGuard,
+};
 
 static KEEPALIVE_RUNNING: AtomicBool = AtomicBool::new(false);
 
@@ -38,6 +41,7 @@ fn refresh_headers(account: &Value, refresh_token: &str) -> HashMap<String, Stri
 /// 刷新单账号 token（POST /v2/plugin/auth/token/refresh），成功则落盘并返回新账号。
 ///
 /// 刷新失败（refresh token 失效等）时给账号标记 needs_relogin，避免无限重试。
+/// 网络层失败例外：只写 `last_refresh_network_error`，不动 needs_relogin。
 pub async fn refresh_account_token(mut account: Value) -> Value {
     let previous_access_token = account
         .get("access_token")
@@ -61,14 +65,20 @@ pub async fn refresh_account_token(mut account: Value) -> Value {
     let resp = http_request(&url, "POST", Some(json!({})), Some(&headers)).await;
     let code = resp.get("code").and_then(|v| v.as_i64()).unwrap_or(-1);
     if code != 0 && code != 200 {
+        let message = resp
+            .get("message")
+            .or_else(|| resp.get("msg"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("未知错误")
+            .to_string();
+        // 网络层失败 ≠ 登录失效：留痕后原样返回，等下次网络恢复自愈。
+        if is_network_error(code, &message) {
+            account["last_refresh_network_error"] = json!({"at": now_ms(), "message": message});
+            let _ = upsert_account(&account);
+            return account;
+        }
         account["needs_relogin"] = json!(true);
-        account["needs_relogin_reason"] = json!(format!(
-            "刷新失败(code={code}): {}",
-            resp.get("message")
-                .or_else(|| resp.get("msg"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("未知错误")
-        ));
+        account["needs_relogin_reason"] = json!(format!("刷新失败(code={code}): {message}"));
         let _ = upsert_account(&account);
         return account;
     }
@@ -132,6 +142,8 @@ pub async fn refresh_account_token(mut account: Value) -> Value {
     let map = account.as_object_mut().unwrap();
     map.remove("needs_relogin");
     map.remove("needs_relogin_reason");
+    // 刷新成功即证明网络恢复，清掉上一次的网络留痕。
+    map.remove("last_refresh_network_error");
     let _ = upsert_account(&account);
     // Windows 不执行 apiKeyHelper；当前 CLI 账号刷新后同步 settings env。
     // 同步失败不阻断 WorkBuddy 保活；状态接口会根据 settings 与账号库是否
@@ -141,6 +153,11 @@ pub async fn refresh_account_token(mut account: Value) -> Value {
             &account,
             previous_access_token.as_deref(),
         );
+    }
+    // gateway(私有) —— 跟随模式：刷新后同步「跟随源当前号」（CLI 优先，内部判定 +
+    // 指纹幂等：被刷账号不是跟随源时写跟随源旧凭证自动跳过；是则写新凭证纠漂）。
+    {
+        let _ = crate::modules::gateway_sync::sync_gateway_credentials_for(None, "refresh");
     }
     account
 }
@@ -182,9 +199,16 @@ pub async fn run_keepalive_cycle() -> Value {
         .get("keepalive_days")
         .and_then(|v| v.as_i64())
         .unwrap_or(0);
-    let accounts = crate::modules::account::load_accounts();
+    // 每轮重新洗牌：账号库表序是固定的，若每轮都按同一顺序连发，服务端拿到的是
+    // 一串雷同的 uid 先后关系（growth_tasks 的家族任务洗牌同款防护）。
+    let mut accounts = crate::modules::account::load_accounts();
     let total = accounts.len();
+    shuffle_by_seed(&mut accounts, now_ms() as u64 ^ 0x9E37_79B9_7F4A_7C15);
     let mut results: Vec<Value> = Vec::new();
+    // 保活是「一个网络窗口内批量刷全库」：若前几个账号全卡在连不上，剩下的
+    // 必失败无疑，继续跑只是把整库账号逐个刷成异常状态。连挂 2 个即熔断。
+    let started_ms = now_ms();
+    let mut net_fail_streak = 0i32;
     for mut acc in accounts {
         let exp = acc.get("expiresAt").and_then(|v| v.as_i64());
         let stale = keep_days <= 0
@@ -210,10 +234,41 @@ pub async fn run_keepalive_cycle() -> Value {
             }));
             continue;
         }
+        let name = crate::modules::account::account_display_name(&acc);
+        // 账号间抖动（2~8s）：只在真要发请求前等，判断为不必刷新的账号不产生延迟。
+        batch_gap().await;
         let fresh = refresh_account_token(acc).await;
         let failed = fresh.get("needs_relogin").and_then(|v| v.as_bool()) == Some(true);
+        // 时间戳 >= 本轮起点才算「本轮刚发生的网络失败」，避免拿历史留痕误熔断。
+        let net_err = fresh
+            .get("last_refresh_network_error")
+            .and_then(|v| v.get("at"))
+            .and_then(|v| v.as_i64())
+            .map(|at| at >= started_ms)
+            .unwrap_or(false);
+        if net_err {
+            net_fail_streak += 1;
+            results.push(json!({
+                "email": name,
+                "status": "network_error",
+                "error": fresh.get("last_refresh_network_error")
+                    .and_then(|v| v.get("message"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+            }));
+            if net_fail_streak >= 2 {
+                return json!({
+                    "checked": total,
+                    "refreshed": results,
+                    "aborted": "network_unreachable",
+                    "aborted_after": results.len(),
+                });
+            }
+            continue;
+        }
+        net_fail_streak = 0;
         results.push(json!({
-            "email": crate::modules::account::account_display_name(&fresh),
+            "email": name,
             "status": if failed { "failed" } else { "ok" },
             "error": if failed {
                 fresh.get("needs_relogin_reason").and_then(|v| v.as_str()).map(|s| s.to_string())

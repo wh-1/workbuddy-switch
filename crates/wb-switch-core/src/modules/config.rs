@@ -634,6 +634,234 @@ pub fn save_travel_cache(cache: &Value) -> std::io::Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// 活跃地图配置 / 缓存
+// ---------------------------------------------------------------------------
+
+/// 活跃地图默认上报时点（本地小时）：跨天后第一次检查就补一轮。
+///
+/// 2026-10-04 从 10 改为 0：原值是按「人已经开机上班」估的兜底点（迁移报告 §4
+/// 「启动补跑已覆盖开机晚于 10 点的场景」），于是每天 00:00–10:00 缓存日期一翻篇
+/// 就既不显示也不补跑 —— 空白窗。实测服务端成长中心日界就是 CST 零点
+/// （heatmap 10-04 当天已有格子），提前上报不存在「记到昨天」的风险。
+pub const ACTIVITY_DEFAULT_HOUR: i64 = 0;
+
+/// `auto_activity_config.json` 的配置版本：v2 起默认时点 10 → 0。
+const ACTIVITY_CONFIG_VERSION: i64 = 2;
+
+/// v1（无 `config_version`）遗留配置里的旧默认时点。
+const ACTIVITY_LEGACY_DEFAULT_HOUR: i64 = 10;
+
+static ACTIVITY_CACHE_WRITE_LOCK: Mutex<()> = Mutex::new(());
+
+/// 串行化活跃地图缓存的读-改-写（自动轮与手动触发可能并发）。
+pub fn with_activity_cache_lock<T>(f: impl FnOnce() -> T) -> T {
+    let _guard = ACTIVITY_CACHE_WRITE_LOCK.lock().unwrap();
+    f()
+}
+
+/// 活跃地图自动执行配置（`~/.wb-switch/auto_activity_config.json`）。
+pub fn activity_config_file() -> PathBuf {
+    store_dir().join("auto_activity_config.json")
+}
+
+/// 活跃地图当日缓存（`~/.wb-switch/activity_cache.json`）。
+pub fn activity_cache_file() -> PathBuf {
+    store_dir().join("activity_cache.json")
+}
+
+/// 默认活跃地图配置：默认开启，跨天后第一次检查即上报。
+pub fn default_activity_config() -> Value {
+    json!({
+        "enabled": true,
+        "hour": ACTIVITY_DEFAULT_HOUR,
+        "config_version": ACTIVITY_CONFIG_VERSION,
+    })
+}
+
+/// 从指定路径读活跃地图配置（缺失/损坏回落默认；hour 越界忽略）。
+///
+/// 独立出 `_at` 版本供单测注入临时目录 —— 测试绝不写真实 `store_dir()`
+/// （HANDOFF §5 坑 73：`save_*` 单测曾把真实配置改掉、连带把服务停掉）。
+pub fn load_activity_config_at(path: &Path) -> Value {
+    let mut cfg = default_activity_config();
+    if path.exists() {
+        if let Ok(text) = std::fs::read_to_string(path) {
+            if let Ok(Value::Object(map)) = serde_json::from_str::<Value>(&text) {
+                if let Some(enabled) = map.get("enabled").and_then(Value::as_bool) {
+                    cfg["enabled"] = json!(enabled);
+                }
+                if let Some(hour) = map.get("hour").and_then(Value::as_i64) {
+                    if (0..=23).contains(&hour) {
+                        cfg["hour"] = json!(hour);
+                    }
+                }
+                // v1 → v2 迁移：老配置没有 `config_version`，其中的 hour=10 是旧默认值
+                // 而不是主人自己挑的时点，落到新默认；非 10 的值视作显式选择，原样保留。
+                // 只在读路径生效（幂等、不写盘），用户随后保存即固化新格式。
+                if map.get("config_version").and_then(Value::as_i64)
+                    != Some(ACTIVITY_CONFIG_VERSION)
+                {
+                    let legacy = map.get("hour").and_then(Value::as_i64);
+                    if legacy.is_none() || legacy == Some(ACTIVITY_LEGACY_DEFAULT_HOUR) {
+                        cfg["hour"] = json!(ACTIVITY_DEFAULT_HOUR);
+                    }
+                }
+            }
+        }
+    }
+    cfg
+}
+
+/// 读取活跃地图配置。
+pub fn load_activity_config() -> Value {
+    load_activity_config_at(&activity_config_file())
+}
+
+/// 保存活跃地图配置（只保留已知字段）。
+pub fn save_activity_config(cfg: &Value) -> std::io::Result<()> {
+    let mut merged = default_activity_config();
+    if let Some(enabled) = cfg.get("enabled").and_then(Value::as_bool) {
+        merged["enabled"] = json!(enabled);
+    }
+    if let Some(hour) = cfg.get("hour").and_then(Value::as_i64) {
+        if (0..=23).contains(&hour) {
+            merged["hour"] = json!(hour);
+        }
+    }
+    std::fs::create_dir_all(store_dir())?;
+    let content = serde_json::to_string_pretty(&merged).unwrap_or_default();
+    atomic_write(&activity_config_file(), &content)
+}
+
+/// 从指定路径读活跃地图缓存。
+pub fn load_activity_cache_at(path: &Path) -> Value {
+    if path.exists() {
+        if let Ok(text) = std::fs::read_to_string(path) {
+            if let Ok(Value::Object(map)) = serde_json::from_str::<Value>(&text) {
+                return Value::Object(map);
+            }
+        }
+    }
+    json!({})
+}
+
+/// 读取活跃地图缓存（`{ date, results: { accountId: {...} } }`）。
+pub fn load_activity_cache() -> Value {
+    load_activity_cache_at(&activity_cache_file())
+}
+
+/// 写入指定路径的活跃地图缓存。
+pub fn save_activity_cache_at(path: &Path, cache: &Value) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let content = serde_json::to_string_pretty(cache).unwrap_or_default();
+    atomic_write(path, &content)
+}
+
+/// 保存活跃地图缓存。
+pub fn save_activity_cache(cache: &Value) -> std::io::Result<()> {
+    std::fs::create_dir_all(store_dir())?;
+    let content = serde_json::to_string_pretty(cache).unwrap_or_default();
+    atomic_write(&activity_cache_file(), &content)
+}
+
+/// 跨模块互斥：growth 任务当日缓存的进程内写锁（与活动地图缓存锁同理，
+/// 防止 cycle 并发写同一份 `growth_tasks_cache.json`）。
+pub fn with_growth_tasks_cache_lock<T>(f: impl FnOnce() -> T) -> T {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    f()
+}
+
+// ---------------------------------------------------------------------------
+// 成长任务自动执行（夜猫子 / 开学季；来源 2api scripts/task_runner.py + school_open_day_2026.py）
+// ---------------------------------------------------------------------------
+
+/// 成长任务自动执行配置（`~/.wb-switch/auto_tasks_config.json`）。
+///
+/// `enabled` 总开关；`schoolHour` 开学季执行点（CST 小时，默认 12，2api crontab 同款）。
+/// 夜猫子不设时点——它按夜猫窗口（23:00–08:00 CST）判定，配置了固定 hour 反而会错过窗口。
+pub fn tasks_config_file() -> PathBuf {
+    store_dir().join("auto_tasks_config.json")
+}
+
+/// 成长任务当日缓存（`~/.wb-switch/growth_tasks_cache.json`，形状同活动地图缓存）。
+pub fn growth_tasks_cache_file() -> PathBuf {
+    store_dir().join("growth_tasks_cache.json")
+}
+
+/// 默认成长任务配置：默认开启。开学季默认 12 点执行。
+pub fn default_tasks_config() -> Value {
+    json!({ "enabled": true, "schoolHour": TASKS_DEFAULT_SCHOOL_HOUR })
+}
+
+pub const TASKS_DEFAULT_SCHOOL_HOUR: i64 = 12;
+
+/// 从指定路径读成长任务配置（缺失/损坏回落默认；hour 越界忽略）。
+pub fn load_tasks_config_at(path: &Path) -> Value {
+    let mut cfg = default_tasks_config();
+    if path.exists() {
+        if let Ok(text) = std::fs::read_to_string(path) {
+            if let Ok(Value::Object(map)) = serde_json::from_str::<Value>(&text) {
+                if let Some(enabled) = map.get("enabled").and_then(Value::as_bool) {
+                    cfg["enabled"] = json!(enabled);
+                }
+                if let Some(hour) = map.get("schoolHour").and_then(Value::as_i64) {
+                    if (0..=23).contains(&hour) {
+                        cfg["schoolHour"] = json!(hour);
+                    }
+                }
+            }
+        }
+    }
+    cfg
+}
+
+/// 读取成长任务配置。
+pub fn load_tasks_config() -> Value {
+    load_tasks_config_at(&tasks_config_file())
+}
+
+/// 保存成长任务配置（只保留已知字段）。
+pub fn save_tasks_config(cfg: &Value) -> std::io::Result<()> {
+    let mut merged = default_tasks_config();
+    if let Some(enabled) = cfg.get("enabled").and_then(Value::as_bool) {
+        merged["enabled"] = json!(enabled);
+    }
+    if let Some(hour) = cfg.get("schoolHour").and_then(Value::as_i64) {
+        if (0..=23).contains(&hour) {
+            merged["schoolHour"] = json!(hour);
+        }
+    }
+    std::fs::create_dir_all(store_dir())?;
+    let content = serde_json::to_string_pretty(&merged).unwrap_or_default();
+    atomic_write(&tasks_config_file(), &content)
+}
+
+/// 从指定路径读成长任务缓存（形状与活动地图缓存一致）。
+pub fn load_growth_tasks_cache_at(path: &Path) -> Value {
+    load_activity_cache_at(path)
+}
+
+/// 读取成长任务缓存。
+pub fn load_growth_tasks_cache() -> Value {
+    load_growth_tasks_cache_at(&growth_tasks_cache_file())
+}
+
+/// 写入指定路径的成长任务缓存。
+pub fn save_growth_tasks_cache_at(path: &Path, cache: &Value) -> std::io::Result<()> {
+    save_activity_cache_at(path, cache)
+}
+
+/// 保存成长任务缓存。
+pub fn save_growth_tasks_cache(cache: &Value) -> std::io::Result<()> {
+    std::fs::create_dir_all(store_dir())?;
+    let content = serde_json::to_string_pretty(cache).unwrap_or_default();
+    atomic_write(&growth_tasks_cache_file(), &content)
+}
+
+// ---------------------------------------------------------------------------
 // 限额监听配置（hook 通路 + IDE 日志扫描的总开关）
 // ---------------------------------------------------------------------------
 
@@ -1044,6 +1272,82 @@ pub async fn http_request_with_proxy(
             }
         }
         Err(e) => json!({"code": -1, "message": e.to_string()}),
+    }
+}
+
+/// 判定 `http_request` 的失败是否属于**网络层**（连不上 / 代理未起 / DNS / TLS / 超时），
+/// 而不是服务端明确拒绝。
+///
+/// 必须与上面的约定配套读：`code = -1` 表示请求根本没发出去，与 401 / 12153
+/// `invalid_grant` 这类「服务端收了并拒绝」混在同一个返回值里。调用方若不区分，
+/// 一次网络抖动就会被当成认证失败 —— 2026-10-03 实证：开机早于代理就绪的那轮
+/// 保活把 7/7 账号全标成 `needs_relogin`，而 token 实际还剩 45 天。
+///
+/// 放在本文件是因为约定（`code = -1`）写在这里，判定要贴着约定走。
+pub fn is_network_error(code: i64, message: &str) -> bool {
+    code == -1 && is_network_message(message)
+}
+
+/// 只看文案判网络层失败：供「上游已把 code 吞掉、只剩一句错误文案」的场景复用
+/// （活跃地图的 `status=error` 只带 `message`，拿不到 `code`）。
+///
+/// 拆成两个函数是为了让 `is_network_error` 保持「code 门槛 + 文案」两层判定不变，
+/// 避免调用方为了判网络错去伪造一个 `code`。
+pub fn is_network_message(message: &str) -> bool {
+    // reqwest::Error 的 Display 前缀固定为 "error sending request for url (..)"，
+    // 其余 hint 覆盖 connect / proxy / dns / tls / timeout 各子类。
+    const NET_HINTS: [&str; 8] = [
+        "error sending request",
+        "connection",
+        "timed out",
+        "timeout",
+        "dns",
+        "proxy",
+        "certificate",
+        "tls",
+    ];
+    let lower = message.to_ascii_lowercase();
+    NET_HINTS.iter().any(|hint| lower.contains(hint))
+}
+
+/// 无 rand 依赖的抖动源：时间 ⊕ 自增计数混乘（同毫秒调用也不重样）。
+///
+/// 由 growth_tasks 提到此处，供批量链路（保活 / 活跃地图）共用——三处各写一份
+/// 恒温代码没意义，而抖动口径必须统一才谈得上「不像脚本」。
+pub fn jitter_u64() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let c = COUNTER.fetch_add(1, Ordering::Relaxed);
+    now_ms() as u64 ^ c.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+}
+
+/// 多账号批量动作之间的抖动间隔（2~8s）。
+///
+/// 为什么必须有：7 个账号不加间隔时，全程只差若干个网络 RTT（实测 2.03s / 7 号，
+/// 单间隔恒定在 270~387ms）。「同一 IP + 秒级完成 + 恒定间隔 + 固定表序」四项
+/// 凑齐就是一份现成的行为指纹。growth_tasks 早对高频写动作做了同款防护
+/// （800~2500ms 抖动 + 每号洗牌），低频的保活 / 活跃当时漏了，这里补齐。
+///
+/// 低频动作可以大方一点，故区间比 `growth_tasks::write_gap` 更宽。
+pub async fn batch_gap() {
+    let ms = 2_000 + jitter_u64() % 6_000;
+    tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+}
+
+/// 按种子确定性洗牌（Fisher-Yates）。
+///
+/// 多账号若每轮都按账号库表序连发，服务端拿到的是一串相同的 uid 先后关系，
+/// 同样是可聚类特征；固定顺序 + 恒定间隔一起出现时尤其明显。
+pub fn shuffle_by_seed<T>(items: &mut [T], mut seed: u64) {
+    if items.len() < 2 {
+        return;
+    }
+    for i in (1..items.len()).rev() {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let j = ((seed >> 33) as usize) % (i + 1);
+        items.swap(i, j);
     }
 }
 
@@ -1796,6 +2100,68 @@ mod tests {
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
         );
         let _ = http_client_builder();
+    }
+
+    // 坑（2026-10-03）：`code = -1` 是「请求没发出去」，与服务端拒绝同走
+    // `code != 0` 分支，不区分就会把一次网络抖动判成认证失败。下面两组断言
+    // 把两类错误钉死在 http_request 的约定旁。
+    #[test]
+    fn transport_failure_is_network_error() {
+        let msg =
+            "error sending request for url (https://www.codebuddy.cn/v2/plugin/auth/token/refresh)";
+        assert!(is_network_error(-1, msg));
+        assert!(is_network_error(-1, "connection refused (os error 10061)"));
+        assert!(is_network_error(-1, "operation timed out"));
+    }
+
+    #[test]
+    fn auth_failure_is_not_network_error() {
+        // 服务端明确拒绝 → 调用方必须按认证失败处理（写 needs_relogin）。
+        assert!(!is_network_error(12153, "invalid_grant"));
+        assert!(!is_network_error(401, "Unauthorized"));
+        assert!(!is_network_error(403, "forbidden"));
+        // 反向验证：非 -1 码即便 message 撞上网络 hint 也不算网络错，
+        // 否则 5xx 页里带 "connection" 字样就会被误判成可自愈。
+        assert!(!is_network_error(500, "connection reset by peer"));
+    }
+
+    #[test]
+    fn shuffle_by_seed_changes_order_and_is_reproducible() {
+        let base = ["a", "b", "c", "d", "e", "f", "g"];
+        // 反向验证：若洗牌退化成恒等（等于没防护），changed 会是 0 —— 这里必须 FAIL。
+        let mut changed = 0;
+        for seed in 0..20u64 {
+            let mut v = base.to_vec();
+            shuffle_by_seed(&mut v, seed);
+            if v != base.to_vec() {
+                changed += 1;
+            }
+        }
+        assert!(
+            changed >= 15,
+            "洗牌必须真打散顺序，恒等即等于没防护（实测仅 {changed}/20 变序）"
+        );
+
+        // 同种子可复现（排障时要能重放同一轮顺序）
+        let mut x = base.to_vec();
+        let mut y = base.to_vec();
+        shuffle_by_seed(&mut x, 7);
+        shuffle_by_seed(&mut y, 7);
+        assert_eq!(x, y);
+
+        // 不得丢元素，也不得对不足 2 个元素的集合 panic
+        let mut z = base.to_vec();
+        shuffle_by_seed(&mut z, 1);
+        let mut got = z.clone();
+        got.sort_unstable();
+        let mut want = base.to_vec();
+        want.sort_unstable();
+        assert_eq!(got, want);
+        let mut one = ["a"];
+        shuffle_by_seed(&mut one, 1);
+        assert_eq!(one, ["a"]);
+        let mut none: [&str; 0] = [];
+        shuffle_by_seed(&mut none, 1);
     }
 
     #[test]

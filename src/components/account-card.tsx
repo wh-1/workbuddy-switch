@@ -1,4 +1,4 @@
-import { ArrowRight, CalendarCheck2, CalendarDays, CalendarOff, Check, CircleCheck, Clock3, Coins, Ellipsis, Gauge, Info, Loader2, PackageOpen, PlaneTakeoff, RefreshCw, Sparkles, Star, Trash2 } from "lucide-react";
+import { ArrowRight, CalendarCheck2, CalendarDays, CalendarOff, Check, CircleCheck, Clock3, Coins, Ellipsis, Gauge, Info, Loader2, PackageOpen, PlaneTakeoff, RefreshCw, Sparkles, Sprout, Star, Trash2 } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 
 import { Badge } from "@/components/ui/badge";
@@ -20,7 +20,7 @@ import { accountIdentity, displayName } from "@/lib/account-display";
 import { avatarTone } from "@/lib/avatar-tone";
 import { creditResourceName } from "@/lib/credit-package-names";
 import { demoModeEnabled } from "@/lib/demo-mode";
-import type { AccountMeta, CreditExpiry, CreditResource, RateLimitEntry, TravelStatus } from "@/lib/types";
+import type { AccountMeta, ActivityStatus, CreditExpiry, CreditResource, RateLimitEntry, TasksStatus, TravelStatus } from "@/lib/types";
 
 function formatCredits(value: number): string {
   if (!Number.isFinite(value)) return "—";
@@ -186,6 +186,147 @@ function travelChip(status: TravelStatus | undefined) {
   }
 }
 
+/**
+ * 成长任务聚合 chip（活跃地图 + 夜猫子 + 活动任务 + 任务家族 + 未来的所有成长任务）：
+ * 卡片上永远只占一个图标，各任务的现状以「段落」形式进 tooltip。
+ *
+ * 扩展方式：新成长任务往 `sections` 里 push 一段即可，无需新 chip；
+ * 段落结构 { name, text, warn } —— warn=true 时整颗 chip 转 warning 色。
+ * 展示口径延续「不占位」原则：所有段落都无话可说时整颗 chip 不渲染。
+ */
+function growthChip(activityStatus: ActivityStatus | undefined, tasksStatus: TasksStatus | undefined) {
+  // 段落带 group：周期（每日/一次性）只做**展示**维度，开关仍按功能域分（见 HANDOFF 坑 78）。
+  const sections: {
+    group: "每日" | "一次性";
+    name: string;
+    text: string;
+    warn?: boolean;
+    /** 已办完、无需再关注的行：tooltip 里转灰但保留，避免用户以为「没跑/坏了」。 */
+    muted?: boolean;
+    /** 今日已办完（活跃地图已点亮 / 活动任务今日已办）；全段 done/muted ⇒ 整颗 chip 转成功色。 */
+    done?: boolean;
+  }[] = [];
+
+  // —— 活跃地图：已点亮才显示连登天数。`stale` = 这份是昨天的数（今天还没跑），
+  //    文案明说「昨日」，且不算 done —— 否则 chip 会因为「都办完了」转绿，
+  //    而今天的活跃地图其实还没办（2026-10-04 修的空白窗）。
+  if (activityStatus && activityStatus.status === "done" && activityStatus.streakDays !== null) {
+    const days = activityStatus.streakDays;
+    const cards = activityStatus.makeupCards ?? 0;
+    const parts = [activityStatus.stale ? `昨日已连登 ${days} 天` : `已连登 ${days} 天`];
+    parts.push(cards > 0 ? `补登卡 ${cards}/${activityStatus.makeupMax ?? cards} 张` : "暂无补登卡");
+    if (activityStatus.redeem === "ok") parts.push(`已兑换 ${activityStatus.tier} 档奖励`);
+    if (activityStatus.lottery === "ok") parts.push("已抽奖");
+    if (activityStatus.message) parts.push(activityStatus.message);
+    sections.push({
+      group: "每日",
+      name: "活跃地图",
+      text: parts.join("，"),
+      warn: false,
+      done: !activityStatus.stale,
+    });
+  }
+
+  // —— 成长任务（夜猫子 / 活动任务 / 任务家族）：各任务一小结
+  //     （夜猫窗口外不打扰；活动下线不渲染；家族领完空转不报）。
+  if (tasksStatus && tasksStatus.status === "done") {
+    const cat = tasksStatus.blackCat;
+    const school = tasksStatus.school;
+    // 夜猫子：服务端 `single`（官方 desc「每天 1 次，累计 3 天」）⇒ 一次性但跨天推进，
+    // 按 target-current 报「还需 N 天」，领完转灰留一行。
+    const catTarget = cat.target ?? 3;
+    const catCurrent = cat.current ?? 0;
+    const catLeft = Math.max(catTarget - catCurrent, 0);
+    if (cat.status === "done" || catCurrent >= catTarget) {
+      sections.push({
+        group: "一次性",
+        name: "夜猫子",
+        text: `已领完 ${catCurrent}/${catTarget}`,
+        muted: true,
+      });
+    } else if (cat.status === "error") {
+      sections.push({ group: "一次性", name: "夜猫子", text: "这轮没成", warn: true });
+    } else if (cat.status === "skipped" && cat.reason === "task-missing") {
+      // 服务端未下发该任务（活动调整/账号不可见）：不占位
+    } else if (cat.status === "skipped" && cat.reason === "outside-night-window") {
+      // 跨天任务的「今日份」窗口内已自动办（cap=1），白天显示剩余天数不该压住成功色。
+      sections.push({ group: "一次性", name: "夜猫子", text: `还需 ${catLeft} 天（23 点后自动办）`, done: true });
+    } else if (cat.status === "progress" || cat.status === "skipped" || cat.status === "pending") {
+      sections.push({ group: "一次性", name: "夜猫子", text: `还需 ${catLeft} 天（${catCurrent}/${catTarget}）`, done: true });
+    }
+    // 活动任务：端点通用（首期=开学季），活动下线后自动空转，未来同类活动不用改文案。
+    // 段内混合周期 ⇒ 按服务端 recurring 计数决定整段归哪组（坑 78）。
+    const schoolGroup = (school.recurring ?? 0) > 0 ? "每日" : "一次性";
+    if (school.status === "done") {
+      const drawn = school.lottery?.drawn ?? 0;
+      const mix = `（每日 ${school.recurring ?? 0} 项 / 一次性 ${school.once ?? 0} 项）`;
+      sections.push({
+        group: schoolGroup,
+        name: "活动任务",
+        text: drawn > 0
+          ? `已领 ${school.claimed ?? 0} 项 + 抽 ${drawn} 次${mix}`
+          : `已领 ${school.claimed ?? 0} 项${mix}`,
+        done: true,
+      });
+    } else if (school.status === "skipped" && school.reason === "out-of-period") {
+      // 活动不在进行期：不占位（活动结束后模块自动空转，未来同类活动复用同端点）。
+    } else if (school.status === "partial" || school.status === "error") {
+      sections.push({ group: schoolGroup, name: "活动任务", text: "部分没成", warn: true });
+    }
+    // 任务家族：服务端实测全 `single` ⇒ 一次性；outstanding 归零即「全领完」转灰留一行。
+    const family = tasksStatus.family;
+    const total = family?.total ?? 0;
+    const outstanding = family?.outstanding ?? 0;
+    if (family?.status === "error") {
+      sections.push({ group: "一次性", name: "任务家族", text: "没跑成", warn: true });
+    } else if (family?.status === "partial") {
+      sections.push({
+        group: "一次性",
+        name: "任务家族",
+        text: `新领 ${family.claimed ?? 0} 项，${family.failed} 项没成`,
+        warn: true,
+      });
+    } else if (total > 0 && outstanding === 0) {
+      sections.push({ group: "一次性", name: "任务家族", text: `已领完 ${total}/${total}`, muted: true });
+    } else if (total > 0) {
+      const text = (family?.claimed ?? 0) > 0
+        ? `新领 ${family?.claimed} 项，还有 ${outstanding} 项`
+        : `还有 ${outstanding} 项待领`;
+      sections.push({ group: "一次性", name: "任务家族", text });
+    }
+  }
+
+  if (sections.length === 0) return null;
+  const hasWarn = sections.some((section) => section.warn);
+  // 今日已全部办完（每段都 done 或 muted）⇒ 整颗 chip 转成功色：打卡完成的标准语义，
+  // 比「转灰」更像「办完了」而不是「没跑」。muted 行在 tooltip 里仍保持灰（不用再管）。
+  const allDone = sections.length > 0 && sections.every((section) => section.done || section.muted);
+  const groups: ("每日" | "一次性")[] = ["每日", "一次性"];
+  return statusIconChip({
+    icon: <Sprout className="size-3.5" />,
+    label: "成长任务",
+    tooltip: (
+      <div className="flex flex-col gap-0.5">
+        {groups
+          .filter((group) => sections.some((section) => section.group === group))
+          .map((group) => (
+            <div key={group} className="flex flex-col gap-0.5">
+              <div className="text-[11px] text-muted-foreground">{group}</div>
+              {sections
+                .filter((section) => section.group === group)
+                .map((section) => (
+                  <div key={section.name} className={cn(section.muted && "text-muted-foreground")}>
+                    {section.name}：{section.text}
+                  </div>
+                ))}
+            </div>
+          ))}
+      </div>
+    ),
+    variant: hasWarn ? "warning" : allDone ? "success" : "secondary",
+  });
+}
+
 /** VS Code 目标 tooltip：区分「未装 VS Code / 未装扩展 / 可切换」三态。 */
 function vscodeExtTooltip(installed?: boolean, extensionInstalled?: boolean): string {
   if (!installed) return "未检测到 VS Code";
@@ -271,9 +412,13 @@ interface Props {
   autoCheckinAllowed?: boolean;
   /** 今日旅行状态（undefined=查询中/未知，不渲染标签） */
   travelStatus?: TravelStatus;
+  /** 今日活跃地图状态；`undefined` = 未查询（不渲染 chip，避免闪位）。 */
+  activityStatus?: ActivityStatus;
+  tasksStatus?: TasksStatus;
   /** 该账号当前受限的模型（来自本机日志台账）；空/缺失=无受限，不渲染图标。 */
   rateLimits?: RateLimitEntry[];
   credit?: CreditExpiry;
+  /** 该账号的「模型 × 解锁时刻」限额状态（只在受限时渲染 chip） */
   creditLoading?: boolean;
   /** 该账号积分最近一次查询完成时间（时间戳） */
   creditUpdatedAt?: number;
@@ -409,7 +554,7 @@ function CreditResourceRow({ resource, compact, placeholderLabel }: { resource?:
   );
 }
 
-export function AccountCard({ account, onDelete, onCheckin, onRefresh, onShowInfo, onSwitch, todayCheckedIn, autoCheckinAllowed, travelStatus, rateLimits, credit, creditLoading, creditUpdatedAt, creditPriority, workbuddyActive, codebuddyCliConfigured, codebuddyCliActive, codebuddyCliBusy, onSwitchCodebuddyCli, codebuddyCliLoading, codebuddyCnIdeAvailable, codebuddyCnIdeActive, codebuddyCnIdeBusy, codebuddyCnIdeLoading, onSwitchCodebuddyCnIde, vscodeExtInstalled, vscodeExtExtensionInstalled, vscodeExtAvailable, vscodeExtActive, vscodeExtBusy, vscodeExtLoading, onSwitchVscodeExt, jetbrainsInstalled, jetbrainsPluginInstalled, jetbrainsAvailable, jetbrainsActive, jetbrainsBusy, jetbrainsLoading, onSwitchJetbrains, enabledTools, featuresDisabled = true, compact = false }: Props) {
+export function AccountCard({ account, onDelete, onCheckin, onRefresh, onShowInfo, onSwitch, todayCheckedIn, autoCheckinAllowed, travelStatus, activityStatus, tasksStatus, rateLimits, credit, creditLoading, creditUpdatedAt, creditPriority, workbuddyActive, codebuddyCliConfigured, codebuddyCliActive, codebuddyCliBusy, onSwitchCodebuddyCli, codebuddyCliLoading, codebuddyCnIdeAvailable, codebuddyCnIdeActive, codebuddyCnIdeBusy, codebuddyCnIdeLoading, onSwitchCodebuddyCnIde, vscodeExtInstalled, vscodeExtExtensionInstalled, vscodeExtAvailable, vscodeExtActive, vscodeExtBusy, vscodeExtLoading, onSwitchVscodeExt, jetbrainsInstalled, jetbrainsPluginInstalled, jetbrainsAvailable, jetbrainsActive, jetbrainsBusy, jetbrainsLoading, onSwitchJetbrains, enabledTools, featuresDisabled = true, compact = false }: Props) {
   /** 支持工具开关：关闭的端整块不渲染（缺省视为开启）。 */
   const toolEnabled = (id: ToolId) => enabledTools?.[id] !== false;
   const [resourcesOpen, setResourcesOpen] = useState(false);
@@ -463,6 +608,7 @@ export function AccountCard({ account, onDelete, onCheckin, onRefresh, onShowInf
           variant: todayCheckedIn ? "success" : "secondary",
         })}
       {travelChip(travelStatus)}
+      {growthChip(activityStatus, tasksStatus)}
       {rateLimitChip(rateLimits, now)}
       {(account.needsRelogin || expired) && <Badge variant="warning" className={chipClass}>{account.needsRelogin ? "需重新登录" : "Token 已过期"}</Badge>}
       {creditPriority && (

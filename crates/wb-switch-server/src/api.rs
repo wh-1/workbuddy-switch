@@ -18,9 +18,9 @@ use rust_embed::RustEmbed;
 use serde_json::{json, Value};
 
 use wb_switch_core::modules::{
-    account, auth_file, checkin, codebuddy_cli, codebuddy_cn_ide, codebuddy_ide,
+    account, activity, auth_file, checkin, codebuddy_cli, codebuddy_cn_ide, codebuddy_ide,
     codebuddy_ide_session, codebuddy_ide_session_sync, config, credit_usage, credits,
-    export_import, jetbrains, limits, notifications, oauth, process, rate_limit_events,
+    export_import, growth_tasks, jetbrains, limits, notifications, oauth, process, rate_limit_events,
     rate_limit_hook, refresh, rotate, session, session_groups, switch, token_stats, travel, update,
     variant::WbVariant, vscode_ext, vscode_session, vscode_session_sync,
 };
@@ -210,6 +210,18 @@ pub fn router() -> Router {
             "/api/travel/config",
             get(api_travel_config).post(api_save_travel_config),
         )
+        .route("/api/activity/status", get(api_activity_status))
+        .route(
+            "/api/activity/config",
+            get(api_activity_config).post(api_save_activity_config),
+        )
+        .route("/api/activity/run", post(api_run_activity))
+        .route("/api/tasks/status", get(api_tasks_status))
+        .route(
+            "/api/tasks/config",
+            get(api_tasks_config).post(api_save_tasks_config),
+        )
+        .route("/api/tasks/run", post(api_run_tasks))
         .route(
             "/api/rotate/config",
             get(api_rotate_config).post(api_save_rotate_config),
@@ -224,6 +236,8 @@ pub fn router() -> Router {
             get(api_update_config).post(api_save_update_config),
         )
         .fallback(static_handler)
+        // 本地新增接口（账号发现 / 补录、数据对齐）集中在 api_local.rs
+        .merge(crate::api_local::router())
 }
 
 fn json_ok(v: Value) -> Response {
@@ -812,29 +826,14 @@ async fn api_switch(Json(body): Json<Value>) -> Response {
     if account_id.trim().is_empty() {
         return json_err("缺少 accountId".to_string(), StatusCode::BAD_REQUEST);
     }
-    let restart = body
-        .get("restart")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
-    let share_sessions = body
-        .get("shareSessions")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    let copy_ids: Vec<String> = body
-        .get("copySessionIds")
-        .and_then(|v| v.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|x| x.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
     // 同步选择与桌面端同形（[{groupId, previewToken, mode}]），形状由 core 校验。
     let sync_selections = match session::parse_sync_selections(body.get("syncSelections")) {
         Ok(selections) => selections,
         Err(error) => return json_err(error, StatusCode::BAD_REQUEST),
     };
-
+    let mut opts: switch::SwitchOptions = serde_json::from_value(body).unwrap_or_default();
+    opts.restart = true;
+    opts.sync_selections = sync_selections;
     {
         let mut running = SWITCH_RUNNING.lock().unwrap();
         if *running {
@@ -849,14 +848,7 @@ async fn api_switch(Json(body): Json<Value>) -> Response {
     });
 
     let result = tokio::task::spawn_blocking(move || {
-        switch::switch_account(
-            Some(&progress),
-            &account_id,
-            restart,
-            share_sessions,
-            &copy_ids,
-            &sync_selections,
-        )
+        switch::switch_account(Some(&progress), &account_id, &opts)
     })
     .await;
 
@@ -1553,6 +1545,96 @@ async fn api_save_travel_config(Json(body): Json<Value>) -> Response {
         }
         Err(e) => json_err(e.to_string(), StatusCode::BAD_REQUEST),
     }
+}
+
+// ---------------------------------------------------------------------------
+// 活跃地图（对话活跃上报 + 连登管家）
+// ---------------------------------------------------------------------------
+
+async fn api_activity_status() -> Response {
+    let items = account::load_accounts()
+        .iter()
+        .map(|acc| {
+            let id = acc.get("id").and_then(Value::as_str).unwrap_or("");
+            let mut value = activity::activity_display(id);
+            value["accountId"] = acc.get("id").cloned().unwrap_or(Value::Null);
+            value["email"] = json!(account::account_display_name(acc));
+            value
+        })
+        .collect::<Vec<_>>();
+    json_ok(json!({ "accounts": items }))
+}
+
+async fn api_activity_config() -> Response {
+    json_ok(config::load_activity_config())
+}
+
+async fn api_save_activity_config(Json(body): Json<Value>) -> Response {
+    let submitted = body.get("config").unwrap_or(&body);
+    match config::save_activity_config(submitted) {
+        Ok(()) => {
+            let saved = config::load_activity_config();
+            if saved.get("enabled").and_then(Value::as_bool) == Some(true) {
+                tokio::spawn(async {
+                    let _ = activity::run_activity_cycle(false).await;
+                });
+            }
+            json_ok(saved)
+        }
+        Err(e) => json_err(e.to_string(), StatusCode::BAD_REQUEST),
+    }
+}
+
+/// 跑一轮活跃地图：默认走当日已办门控（webui「顺手补跑」用，已点亮的账号零请求短路）；
+/// `?force=1` 跳过开关 / 时点 / 当日已办三道闸（排障用）。
+async fn api_run_activity(Query(q): Query<std::collections::HashMap<String, String>>) -> Response {
+    let force = q.get("force").is_some_and(|v| v == "1" || v == "true");
+    json_ok(activity::run_activity_cycle(force).await)
+}
+
+// ---------------------------------------------------------------------------
+// 成长任务（夜猫子 / 开学季）
+// ---------------------------------------------------------------------------
+
+async fn api_tasks_status() -> Response {
+    let items = account::load_accounts()
+        .iter()
+        .map(|acc| {
+            let id = acc.get("id").and_then(Value::as_str).unwrap_or("");
+            let mut value = growth_tasks::tasks_display(id);
+            value["accountId"] = acc.get("id").cloned().unwrap_or(Value::Null);
+            value["email"] = json!(account::account_display_name(acc));
+            value
+        })
+        .collect::<Vec<_>>();
+    json_ok(json!({ "accounts": items }))
+}
+
+async fn api_tasks_config() -> Response {
+    json_ok(config::load_tasks_config())
+}
+
+async fn api_save_tasks_config(Json(body): Json<Value>) -> Response {
+    let submitted = body.get("config").unwrap_or(&body);
+    match config::save_tasks_config(submitted) {
+        Ok(()) => {
+            let saved = config::load_tasks_config();
+            if saved.get("enabled").and_then(Value::as_bool) == Some(true) {
+                tokio::spawn(async {
+                    let _ = growth_tasks::run_tasks_cycle(false).await;
+                });
+            }
+            json_ok(saved)
+        }
+        Err(e) => json_err(e.to_string(), StatusCode::BAD_REQUEST),
+    }
+}
+
+/// 跑一轮成长任务：默认走当日已办门控（已办妥的段零请求短路，只补没办的）；
+/// `?force=1` 跳过开关 / 窗口 / 当日已办（排障用，全量重跑 7 账号实测 130s）。
+async fn api_run_tasks(Query(q): Query<std::collections::HashMap<String, String>>) -> Response {
+    let force = q.get("force").is_some_and(|v| v == "1" || v == "true");
+    json_ok(growth_tasks::run_tasks_cycle(force).await)
 }
 
 async fn api_refresh_token(Json(body): Json<Value>) -> Response {

@@ -10,6 +10,7 @@
     "dev:screenshot": "node scripts/prepare-companion-demo.mjs dev && VITE_DEMO_MODE=1 vite",
     "tauri:dev:screenshot": "WB_SWITCH_SCREENSHOT_DEMO=1 VITE_DEMO_MODE=1 tauri dev",
     "build": "node scripts/prepare-companion-demo.mjs clean && tsc && vite build",
+    "verify": "node node_modules/typescript/bin/tsc --noEmit && cargo test -p wb-switch-core",
     "build:desktop": "node scripts/prepare-agent-companion.mjs build && npm run build && node scripts/prepare-agent-companion.mjs copy",
     "build:demo": "node scripts/prepare-companion-demo.mjs build && tsc && VITE_DEMO_MODE=1 VITE_PAGES_DEMO=1 vite build && node scripts/prepare-companion-demo.mjs copy",
     "test": "vitest run",
@@ -44,8 +45,8 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "lucide-react": "^1.31.0",
-    "react": "^19.1.0",
-    "react-dom": "^19.1.0",
+    "react": "19.1.0",
+    "react-dom": "19.1.0",
     "react-router-dom": "^7.18.2",
     "recharts": "^2.15.4",
     "sonner": "^2.0.8",
@@ -61,7 +62,7 @@
     "@vitejs/plugin-react": "^4.6.0",
     "tailwindcss": "^4.3.3",
     "typescript": "~5.8.3",
-    "vite": "^7.0.4",
+    "vite": "8.3.0",
     "vitest": "^5.0.2"
   }
 }

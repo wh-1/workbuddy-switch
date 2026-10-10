@@ -759,6 +759,21 @@ pub(crate) fn parse_reset_at(line: &str) -> Option<i64> {
     None
 }
 
+/// [`parse_reset_at`] 的伴随函数：返回被解析的那段「YYYY-MM-DD HH:MM:SS」锚串。
+///
+/// 回显防护用（rate_limit_events）：真实 429 文案的恢复时刻只出现一次；
+/// 同一条消息里锚串出现 ≥2 次 = 工具回显 + 助手复述的转述行，不是单一真实事件。
+pub(crate) fn reset_anchor_text(line: &str) -> Option<String> {
+    for marker in RESET_MARKERS {
+        let index = line.find(marker)?;
+        let rest = &line[index + marker.len()..];
+        parse_datetime_prefix(rest)?;
+        parse_utc_offset(rest)?;
+        return Some(rest.get(..19)?.to_string());
+    }
+    None
+}
+
 /// 取前缀里的 `YYYY-MM-DD HH:MM:SS`。
 fn parse_datetime_prefix(text: &str) -> Option<NaiveDateTime> {
     NaiveDateTime::parse_from_str(text.get(..19)?, "%Y-%m-%d %H:%M:%S").ok()

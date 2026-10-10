@@ -1,5 +1,6 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 mod commands;
+mod commands_local;
 mod companion;
 #[cfg(target_os = "macos")]
 mod instance_lock;
@@ -93,6 +94,26 @@ fn spawn_background_loops(app: tauri::AppHandle) {
         }
     });
 
+    // 活跃地图：启动即跑一轮（当日未办才真正发请求），之后每 30 分钟检查「到点且当日未办」。
+    // 时点闸与「每号每天一次」都由 core 内的缓存日期判定，外层只负责叫醒。
+    tauri::async_runtime::spawn(async move {
+        let _ = modules::activity::run_activity_cycle(false).await;
+        loop {
+            tokio::time::sleep(modules::activity::ACTIVITY_RETRY_INTERVAL).await;
+            let _ = modules::activity::run_activity_cycle(false).await;
+        }
+    });
+
+    // 成长任务（夜猫子/开学季）：启动即查一轮（落在夜猫窗口内能立即补办），之后 30 分钟检查。
+    // 窗口/时点/当日幂等都在 core 判定，外层只负责叫醒。
+    tauri::async_runtime::spawn(async move {
+        let _ = modules::growth_tasks::run_tasks_cycle(false).await;
+        loop {
+            tokio::time::sleep(modules::growth_tasks::TASKS_RETRY_INTERVAL).await;
+            let _ = modules::growth_tasks::run_tasks_cycle(false).await;
+        }
+    });
+
     tauri::async_runtime::spawn(async move {
         let mut last_keepalive_day = String::new();
         let mut last_rotate_at: i64 = 0;
@@ -114,14 +135,22 @@ fn spawn_background_loops(app: tauri::AppHandle) {
             }
             let today = modules::checkin::date_str(None);
             if today != last_keepalive_day {
-                last_keepalive_day = today;
                 // 保活会批量改写 `access_token` 并同步回 settings.json，期间前端若拉到
                 // 状态会读到「账号库已换新、settings 未跟上」的中间态。刷新前后各广播
                 // 一次：先让前端把已显示的旧判断标记为「同步中」，刷新完再让它重读，
                 // 避免误判的告警滞留在页面上。
                 notify_codebuddy_cli_updated(&rotate_app);
-                let _ = modules::refresh::run_keepalive_cycle().await;
+                let result = modules::refresh::run_keepalive_cycle().await;
                 notify_codebuddy_cli_updated(&rotate_app);
+                // 坑（2026-10-03 实证）：`last_keepalive_day` 原先在**跑之前**就置成今天，
+                // 于是整轮被网络中断熔断后，当天不再重试 —— 开机早于代理就绪的那一次
+                // 会把账号库状态挂到次日才可能自愈。网络不通时不消耗当天配额，
+                // 本循环 30 秒后自然回来重试，网络一恢复即自动补刷。
+                let aborted_by_network = result.get("aborted").and_then(|v| v.as_str())
+                    == Some("network_unreachable");
+                if !aborted_by_network {
+                    last_keepalive_day = today;
+                }
             }
             tokio::time::sleep(Duration::from_secs(30)).await;
         }
@@ -210,6 +239,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_status,
             commands::get_accounts,
+            commands_local::discover_known_accounts,
+            commands_local::adopt_account,
             commands::get_codebuddy_cli_status,
             commands::install_codebuddy_cli_helper,
             commands::switch_codebuddy_cli_account,
@@ -241,6 +272,8 @@ pub fn run() {
             commands::preview_import_accounts,
             commands::import_accounts,
             commands::switch_account,
+            commands_local::align_automations,
+            commands_local::align_data,
             commands::list_sessions,
             commands::list_account_sessions,
             commands::copy_sessions,
@@ -280,6 +313,14 @@ pub fn run() {
             commands::get_travel_status,
             commands::get_auto_travel_config,
             commands::save_auto_travel_config,
+            commands::get_activity_status,
+            commands::run_activity_now,
+            commands::get_auto_activity_config,
+            commands::save_auto_activity_config,
+            commands::get_tasks_status,
+            commands::run_tasks_now,
+            commands::get_auto_tasks_config,
+            commands::save_auto_tasks_config,
             commands::refresh_account_token,
             commands::get_auto_rotate_config,
             commands::save_auto_rotate_config,
@@ -298,6 +339,21 @@ pub fn run() {
             commands::record_notification,
             commands::list_notifications,
             commands::clear_notifications,
+            // gateway(私有) —— 网关跟随同步（v3.2）
+            commands::get_gateway_config,
+            commands::save_gateway_config,
+            commands::get_gateway_sync_status,
+            commands::gateway_resync,
+            // gateway(私有) —— 本地网关服务的启停与体检
+            commands::get_gateway_services_status,
+            commands::save_gateway_services_config,
+            commands::start_gateway_service,
+            commands::stop_gateway_service,
+            commands::restart_gateway_service,
+            // gateway(私有) —— 协议端点（Anthropic / Responses）开关与探活
+            commands::get_gateway_protocol_status,
+            commands::save_gateway_protocol_gates,
+
             commands::log_error,
             commands::get_error_log_path,
             commands::reveal_error_log,

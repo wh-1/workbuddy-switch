@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { toast } from "sonner";
 import { BrowserRouter, HashRouter, Navigate, NavLink, Outlet, Route, Routes } from "react-router-dom";
-import { ArrowUp, Link2, Loader2, MessagesSquare, Play, Settings, Sparkles, User } from "lucide-react";
+import { ArrowUp, Globe, Link2, Loader2, MessagesSquare, Play, Settings, Sparkles, User } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import * as api from "@/lib/api";
@@ -10,6 +10,7 @@ import SessionsPage from "@/pages/SessionsPage";
 import CreditStatsPage from "@/pages/CreditStatsPage";
 import TokenStatsPage from "@/pages/TokenStatsPage";
 import SettingsPage from "@/pages/SettingsPage";
+import GatewayPage from "@/pages/GatewayPage"; // gateway(私有)：摘取上游 PR 时连同网关文件整体剔除
 import { StatusDot, AppIconMark } from "@/components/product-marks";
 import { CompanionDemoDialog } from "@/components/companion-demo-dialog";
 import { UpdateInstallDialog } from "@/components/update-install-dialog";
@@ -322,6 +323,7 @@ function Layout() {
             <Settings className="size-4" />
             设置
           </NavLink>
+          <NavLink to="/gateway" className={({ isActive }) => cn("flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm outline-none transition-colors", isActive ? "bg-foreground/[0.06] font-medium text-foreground" : "text-muted-foreground hover:bg-foreground/[0.04] hover:text-foreground")}><Globe className="size-4" />网关</NavLink> {/* gateway(私有) */}
         </nav>
         {api.isWebui() && !demoModeEnabled ? null : <UpdateCenter running={running} />}
       </aside>
@@ -350,6 +352,7 @@ export default function App() {
             <Route path="/credit-stats" element={<CreditStatsPage />} />
             <Route path="/token-stats" element={<TokenStatsPage />} />
             <Route path="/settings" element={<SettingsPage />} />
+            <Route path="/gateway" element={<GatewayPage />} /> {/* gateway(私有) */}
             <Route path="*" element={<Navigate to="/" replace />} />
           </Route>
         </Routes>

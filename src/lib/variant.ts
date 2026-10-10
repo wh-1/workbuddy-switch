@@ -52,6 +52,16 @@ export function variantSupportsCheckin(variant: WbVariant): boolean {
   return variant !== "ai";
 }
 
+/**
+ * 活跃地图仅国内版开放，与旅行同口径。
+ *
+ * 国际版 `/activity/growth/streak` 实测 500 ⇒ 拿不到连登天数，后续补签/兑换全无判据。
+ * 后端 `supports_activity()` 已在发请求前短路，前端这里同步隐藏入口。
+ */
+export function variantSupportsActivity(variant: WbVariant): boolean {
+  return variant !== "ai";
+}
+
 /** 国际版 Tab 切 CodeBuddy.app；国内版 Tab 仍切 CodeBuddy CN。 */
 export function variantUsesIntlCodebuddyIde(variant: WbVariant): boolean {
   return variant === "ai";

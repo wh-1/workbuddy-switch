@@ -33,11 +33,18 @@ import { TimePicker } from "@/components/ui/time-picker";
 import { displayName } from "@/lib/account-display";
 import * as api from "@/lib/api";
 import { canPersistErrorLog } from "@/lib/error-report";
+// gateway(私有) —— 网关跟随同步（v3.2）
+import {
+  fetchGatewaySyncConfig,
+  saveGatewaySyncConfig,
+  type GatewaySyncConfig,
+} from "@/lib/gateway-sync";
 import { setSessionsNavEnabled, useSessionsNavEnabled } from "@/lib/nav-prefs";
 import { getThemePreference, setThemePreference, type ThemePreference } from "@/lib/theme";
 import { SUPPORTED_TOOLS, setToolEnabled, useSupportedTools, type ToolId } from "@/lib/supported-tools";
 import type {
   AccountMeta,
+  ActivityConfig,
   AppNotification,
   AutoRotateConfig,
   CheckinConfig,
@@ -54,7 +61,7 @@ import { GITHUB_RELEASE_URL, GITHUB_REPOSITORY_URL, openReleaseUrl } from "@/lib
 import { useUpdateState } from "@/lib/use-update-state";
 import { changeCompanionEnabled, reloadCompanionEnabled, useCompanionEnabled } from "@/lib/use-companion-enabled";
 import { cn } from "@/lib/utils";
-import { accountVariant, variantSupportsCheckin, variantSupportsTravel, variantUsesIntlCodebuddyIde } from "@/lib/variant";
+import { accountVariant, variantSupportsActivity, variantSupportsCheckin, variantSupportsTravel, variantUsesIntlCodebuddyIde } from "@/lib/variant";
 import { UpdateInstallDialog } from "@/components/update-install-dialog";
 import { DemoAction } from "@/components/demo-action";
 import { CodeBuddyAiIdeMark, CodeBuddyCnIdeMark, CodeBuddyMark, JetbrainsMark, VscodeExtMark, WorkBuddyAiMark, WorkBuddyMark } from "@/components/product-marks";
@@ -753,6 +760,12 @@ function AutoCheckinCard() {
               行本身独立于签到配置的加载状态，签到配置读取失败也不影响开关。 */}
           {variantSupportsTravel(variant) ? <AutoTravelRow /> : null}
 
+          {/* 活跃地图同样只在成长中心（国内版）开放。与旅行不同它多一个「时点」：
+              跨天后到点才补跑一轮，0 点 = 零点一过就补。原默认 10 点让页面每天早上
+              空白 10 小时（缓存日期翻篇、前端又不显示昨天的数），所以默认值改成 0，
+              这里也把它露出来让人自己调。 */}
+          {variantSupportsActivity(variant) ? <AutoActivityRow /> : null}
+
           <AccordionSettingsRow
             value="logs"
             label="签到日志"
@@ -866,6 +879,112 @@ function AutoTravelRow() {
         aria-label="启用自动旅行"
       />
     </SettingsFieldRow>
+  );
+}
+
+const ACTIVITY_NUMBER_FIELDS = {
+  hour: { label: "上报时点", min: 0, max: 23 },
+} as const satisfies Record<string, NumberFieldSpec>;
+
+/**
+ * 活跃地图：启用开关 + 上报时点，渲染在「自动签到」卡片内部（不独立成卡）。
+ *
+ * 「时点」是 2026-10-04 补进设置页的：原先只有 `auto_activity_config.json` 里的
+ * `hour`，默认 10 点 —— 每天零点缓存翻篇后既不显示昨天的数、又要等到 10 点才补跑，
+ * 页面空白一上午。默认已改成 0（跨天后第一次检查就补），这里把它露出来，
+ * 夜里不联网的人可以自己往后调。
+ */
+function AutoActivityRow() {
+  const [cfg, setCfg] = useState<ActivityConfig | null>(null);
+  /** 输入期间只改草稿文本，失焦 / 回车才提交（区分「清空」与「0」）。 */
+  const [hourDraft, setHourDraft] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void api
+      .getAutoActivityConfig()
+      .then((config) => {
+        if (cancelled) return;
+        setCfg(config);
+        setHourDraft(String(config.hour));
+      })
+      .catch((e) => {
+        if (!cancelled) toast.error("活跃地图配置加载失败", { description: api.asError(e) });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function patch(next: Partial<ActivityConfig>, title: string, description?: string) {
+    if (!cfg || busy) return;
+    const previous = cfg;
+    const merged = { ...cfg, ...next };
+    setCfg(merged);
+    setBusy(true);
+    try {
+      const saved = await api.saveAutoActivityConfig(merged);
+      setCfg(saved);
+      setHourDraft(String(saved.hour));
+      toast.success(title, { description: description ?? "立刻生效" });
+    } catch (e) {
+      setCfg(previous);
+      setHourDraft(String(previous.hour));
+      toast.error("活跃地图设置保存失败", { description: api.asError(e) });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function onHourCommit(raw: string) {
+    const parsed = resolveNumberInput(raw, ACTIVITY_NUMBER_FIELDS.hour);
+    if (parsed === null) {
+      setHourDraft(String(cfg?.hour ?? 0));
+      return;
+    }
+    if (cfg && parsed === cfg.hour) return;
+    void patch(
+      { hour: parsed },
+      "上报时点已保存",
+      parsed === 0
+        ? "跨天后第一次检查就补跑没办的"
+        : `每天 ${String(parsed).padStart(2, "0")} 点之后补跑没办的`,
+    );
+  }
+
+  return (
+    <>
+      <SettingsFieldRow
+        label="启用活跃地图"
+        description="点亮连登、领每日奖励；开着时点右侧刷新会顺手补跑没办的号"
+        htmlFor="aa-enabled"
+        operational
+      >
+        <Switch
+          id="aa-enabled"
+          checked={cfg?.enabled ?? false}
+          disabled={busy || !cfg}
+          onCheckedChange={(v) =>
+            void patch({ enabled: v }, v ? "活跃地图已开启" : "活跃地图已关闭")
+          }
+          aria-label="启用活跃地图"
+        />
+      </SettingsFieldRow>
+      {cfg?.enabled ? (
+        <div className={INSET_PANEL}>
+          <NumberSettingRow
+            className={PANEL_ROW}
+            id="aa-hour"
+            spec={ACTIVITY_NUMBER_FIELDS.hour}
+            description="小时；夜里不联网就往后调"
+            value={hourDraft}
+            onChange={setHourDraft}
+            onCommit={(raw) => onHourCommit(raw)}
+          />
+        </div>
+      ) : null}
+    </>
   );
 }
 
@@ -2092,7 +2211,102 @@ function RateLimitCard() {
   );
 }
 
-/** 设置页：演示模式不渲染自动签到；Agent Companion 只在桌面正式版显示。 */
+/** 设置页：外观 / 权限检测 / 自动签到（含自动旅行）/ 自动轮换 / 限额监听 / 更新配置。 */
+// gateway(私有) —— 网关跟随同步配置（v3.2 跟随模式）。摘取上游 PR 时整体剔除。
+function GatewaySyncSettingsCard() {
+  const [config, setConfig] = useState<GatewaySyncConfig | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<{ type: "ok" | "err"; text: string } | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void fetchGatewaySyncConfig()
+      .then((cfg) => {
+        if (!cancelled) setConfig(cfg);
+      })
+      .catch((e) => {
+        if (!cancelled) setMsg({ type: "err", text: api.asError(e) });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function save(next: GatewaySyncConfig) {
+    if (busy) return;
+    const previous = config;
+    setConfig(next);
+    setBusy(true);
+    setMsg(null);
+    try {
+      setConfig(await saveGatewaySyncConfig(next));
+      setMsg({ type: "ok", text: "已保存；下次切号/登录/刷新自动生效" });
+    } catch (e) {
+      setConfig(previous);
+      setMsg({ type: "err", text: api.asError(e) });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <SettingsGroup id="settings-gateway-sync" title="网关跟随同步">
+      <CardContent className="space-y-0 p-0">
+        <SettingsFieldRow
+          label="启用跟随同步"
+          description="切号 / 登录 / 凭证刷新后自动把当前账号同步给 2api 网关（网关池里永远只有当前账号）"
+          htmlFor="gw-enabled"
+          operational
+        >
+          <Switch
+            id="gw-enabled"
+            checked={config?.enabled ?? false}
+            disabled={busy || !config}
+            onCheckedChange={(v) =>
+              void save({ enabled: v, authsDir: config?.authsDir ?? "" })
+            }
+            aria-label="启用网关跟随同步"
+          />
+        </SettingsFieldRow>
+        <SettingsFieldRow
+          label="网关 auths 目录"
+          description="2api 的账号目录（本机部署默认 D:/w-dev/wb/workbuddy2api/auths）；留空表示不同步"
+          htmlFor="gw-auths-dir"
+        >
+          <Input
+            id="gw-auths-dir"
+            className="w-72 font-mono text-xs"
+            value={config?.authsDir ?? ""}
+            disabled={busy || !config}
+            placeholder="D:/w-dev/wb/workbuddy2api/auths"
+            onChange={(e) =>
+              setConfig((prev) => (prev ? { ...prev, authsDir: e.target.value } : prev))
+            }
+            onBlur={() => {
+              // 失焦保存：目录填错时同步会失败进重试队列，网关页会标红提示
+              if (config) void save(config);
+            }}
+          />
+        </SettingsFieldRow>
+        {msg ? (
+          <div className="border-t border-border/50 px-4 py-2 text-xs sm:px-5">
+            <span
+              className={
+                msg.type === "ok"
+                  ? "text-emerald-600 dark:text-emerald-400"
+                  : "text-destructive"
+              }
+            >
+              {msg.text}
+            </span>
+          </div>
+        ) : null}
+      </CardContent>
+    </SettingsGroup>
+  );
+}
+
+/** 设置页：自动签到配置 / 权限检测 / 更新配置；演示模式不渲染自动签到；Agent Companion 只在桌面正式版显示。 */
 export default function SettingsPage() {
   return (
     <div className="mx-auto min-w-0 w-full max-w-3xl px-4 py-6 sm:px-6 sm:py-8">
@@ -2110,6 +2324,7 @@ export default function SettingsPage() {
         {api.isDemoMode() ? null : <AutoCheckinCard />}
         <AutoRotateCard />
         <RateLimitCard />
+        {api.isDesktop() || api.isDemoMode() ? <GatewaySyncSettingsCard /> : null}
         {api.isDesktop() && !api.isDemoMode() ? <CompanionCard /> : null}
         {api.isDesktop() || api.isDemoMode() ? <StartupCard /> : null}
         <NotificationHistoryCard />

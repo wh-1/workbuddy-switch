@@ -8,9 +8,9 @@ use serde_json::{json, Value};
 
 use tauri::Emitter;
 use wb_switch_core::modules::{
-    account, auth_file, checkin, codebuddy_cli, codebuddy_cn_ide, codebuddy_ide,
+    account, activity, auth_file, checkin, codebuddy_cli, codebuddy_cn_ide, codebuddy_ide,
     codebuddy_ide_session, codebuddy_ide_session_sync, credit_usage, credits, error_log,
-    export_import, jetbrains, limits, notifications, oauth, process, rate_limit_events,
+    export_import, growth_tasks, jetbrains, limits, notifications, oauth, process, rate_limit_events,
     rate_limit_hook, refresh, rotate, session, session_groups, switch, token_stats, travel, update,
     variant::WbVariant, vscode_ext, vscode_session, vscode_session_sync,
 };
@@ -570,36 +570,47 @@ pub fn reveal_app_in_finder() -> Result<(), String> {
 ///
 /// async + spawn_blocking：切换中关闭/启动 WorkBuddy 会阻塞数十秒，
 /// 若在同步 command（主线程）执行会卡死整个 UI（loading 遮罩无法渲染）。
+///
+/// 参数走扁平 camelCase（与 align_data 及 HTTP api 一致）：
+/// 前端 invoke 传的是扁平字段，若改用嵌套 `Option<SwitchOptions>`，
+/// 前端字段对不上参数名会静默落回 Default（勾选全部失效）。
 #[tauri::command(rename_all = "camelCase")]
 pub async fn switch_account(
     app: tauri::AppHandle,
     account_id: String,
-    restart: Option<bool>,
+    _restart: Option<bool>,
     share_sessions: Option<bool>,
     copy_session_ids: Option<Vec<String>>,
+    align_automations: Option<bool>,
+    align_files: Option<bool>,
+    slim_keep: Option<i64>,
+    auto_link: Option<bool>,
+    dry_run: Option<bool>,
     sync_selections: Option<Value>,
 ) -> Result<Value, String> {
     if account_id.trim().is_empty() {
         return Err("缺少 accountId".to_string());
     }
-    let restart = restart.unwrap_or(true);
-    let share_sessions = share_sessions.unwrap_or(false);
-    let copy_ids = copy_session_ids.unwrap_or_default();
     // 入参形状由 core 校验（缺 groupId / previewToken / mode 一律拒绝）；这里只做透传，
     // 不在命令层做业务判定。
     let sync_selections = session::parse_sync_selections(sync_selections.as_ref())?;
-    let progress: switch::ProgressFn = Box::new(move |message| {
+    // 桌面端切换必定重启（原实现同样强制），其余选项尊重前端勾选，
+    // 缺省值与 SwitchOptions::default 保持一致。
+    let opts = switch::SwitchOptions {
+        restart: true,
+        share_sessions: share_sessions.unwrap_or(false),
+        copy_session_ids: copy_session_ids.unwrap_or_default(),
+        align_automations: align_automations.unwrap_or(true),
+        align_files: align_files.unwrap_or(false),
+        slim_keep: slim_keep.unwrap_or(0),
+        auto_link: auto_link.unwrap_or(true),
+        dry_run: dry_run.unwrap_or(false),
+        sync_selections,
+    };    let progress: switch::ProgressFn = Box::new(move |message| {
         let _ = app.emit("switch-progress", json!({ "message": message }));
     });
     tauri::async_runtime::spawn_blocking(move || {
-        switch::switch_account(
-            Some(&progress),
-            &account_id,
-            restart,
-            share_sessions,
-            &copy_ids,
-            &sync_selections,
-        )
+        switch::switch_account(Some(&progress), &account_id, &opts)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -1166,6 +1177,82 @@ pub fn save_auto_travel_config(config: Value) -> Result<Value, String> {
 }
 
 // ---------------------------------------------------------------------------
+// 活跃地图（对话活跃上报 + 连登管家）
+// ---------------------------------------------------------------------------
+
+/// GET /api/activity/status —— 单账号今日活跃地图状态（连登天数 / 补登卡 / 档位）。
+/// 当日尚未轮到时返回 `{"status":"pending"}`，由前端展示为「今天还没点亮」。
+#[tauri::command]
+pub fn get_activity_status(account_id: String) -> Result<Value, String> {
+    account::find_account(&account_id).ok_or("账号不存在")?;
+    Ok(activity::activity_display(&account_id))
+}
+
+/// POST /api/activity/run —— 立刻跑一轮（跳过开关 / 时点 / 当日已办三道闸，排障用）。
+#[tauri::command]
+pub async fn run_activity_now() -> Result<Value, String> {
+    // 走当日已办门控（force=false）：今日已点亮的账号自动短路，刷新按钮每次顺手调也不浪费请求。
+    Ok(activity::run_activity_cycle(false).await)
+}
+
+/// GET /api/activity/config —— 活跃地图自动执行配置。
+#[tauri::command]
+pub fn get_auto_activity_config() -> Value {
+    crate::modules::config::load_activity_config()
+}
+
+/// POST /api/activity/config —— 保存活跃地图配置；开启时立刻跑一轮。
+#[tauri::command]
+pub fn save_auto_activity_config(config: Value) -> Result<Value, String> {
+    crate::modules::config::save_activity_config(&config).map_err(|e| e.to_string())?;
+    let saved = crate::modules::config::load_activity_config();
+    if saved.get("enabled").and_then(Value::as_bool) == Some(true) {
+        tauri::async_runtime::spawn(async {
+            let _ = activity::run_activity_cycle(false).await;
+        });
+    }
+    Ok(saved)
+}
+
+// ---------------------------------------------------------------------------
+// 成长任务（夜猫子 / 开学季）
+// ---------------------------------------------------------------------------
+
+/// GET /api/tasks/status —— 单账号今日成长任务状态（夜猫子 / 活动任务 / 任务家族各一段）。
+#[tauri::command]
+pub fn get_tasks_status(account_id: String) -> Result<Value, String> {
+    account::find_account(&account_id).ok_or("账号不存在")?;
+    Ok(growth_tasks::tasks_display(&account_id))
+}
+
+/// POST /api/tasks/run —— 立刻跑一轮（跳过开关 / 窗口 / 当日已办，排障用）。
+#[tauri::command]
+pub async fn run_tasks_now() -> Result<Value, String> {
+    // 走当日已办门控（force=false）：已办妥的段直接短路（零请求），只补没办的。
+    // 实测全办完时一轮 <2s；force=true 会全量重跑（7 账号 130s），只留给调试场景。
+    Ok(growth_tasks::run_tasks_cycle(false).await)
+}
+
+/// GET /api/tasks/config —— 成长任务自动执行配置。
+#[tauri::command]
+pub fn get_auto_tasks_config() -> Value {
+    crate::modules::config::load_tasks_config()
+}
+
+/// POST /api/tasks/config —— 保存成长任务配置；开启时立刻查一轮（窗口内能立即补）。
+#[tauri::command]
+pub fn save_auto_tasks_config(config: Value) -> Result<Value, String> {
+    crate::modules::config::save_tasks_config(&config).map_err(|e| e.to_string())?;
+    let saved = crate::modules::config::load_tasks_config();
+    if saved.get("enabled").and_then(Value::as_bool) == Some(true) {
+        tauri::async_runtime::spawn(async {
+            let _ = growth_tasks::run_tasks_cycle(false).await;
+        });
+    }
+    Ok(saved)
+}
+
+// ---------------------------------------------------------------------------
 // 自动轮换（CodeBuddy CLI）
 // ---------------------------------------------------------------------------
 
@@ -1465,4 +1552,79 @@ pub async fn list_notifications() -> Result<Value, String> {
 #[tauri::command]
 pub async fn clear_notifications() -> Result<(), String> {
     notifications::clear()
+}
+
+// ---------------------------------------------------------------------------
+// gateway(私有) —— 网关跟随同步（v3.2）：配置 / 状态 / 一键重同步。
+// 摘取上游 PR 时与 gateway_sync 模块、gateway.ts、GatewayPage 整体剔除。
+// ---------------------------------------------------------------------------
+
+/// GET 网关跟随同步配置（enabled + authsDir）。
+#[tauri::command]
+pub fn get_gateway_config() -> Value {
+    crate::modules::gateway_sync::load_gateway_config()
+}
+
+/// POST 保存网关跟随同步配置。
+#[tauri::command]
+pub fn save_gateway_config(config: Value) -> Result<Value, String> {
+    crate::modules::gateway_sync::save_gateway_config(&config)
+}
+
+/// GET 跟随同步状态：本地当前 uid vs 网关池 uid 一致性（uidMatch=false 前端标红）。
+#[tauri::command]
+pub fn get_gateway_sync_status() -> Value {
+    crate::modules::gateway_sync::gateway_sync_status()
+}
+
+/// POST 一键重新同步当前账号到网关（绕过指纹幂等，强制落盘）。
+#[tauri::command]
+pub fn gateway_resync() -> Value {
+    crate::modules::gateway_sync::gateway_resync()
+}
+
+// ---- 本地网关服务（2api 网关）的启停与体检 ----
+
+/// GET 全部服务一体体检（`health` ∈ ok / degraded / down）。
+#[tauri::command]
+pub fn get_gateway_services_status() -> Value {
+    crate::modules::gateway_services::gateway_services_status()
+}
+
+/// POST 保存服务配置。
+#[tauri::command]
+pub fn save_gateway_services_config(config: Value) -> Result<Value, String> {
+    crate::modules::gateway_services::save_config(&config)
+}
+
+/// POST 启动单个服务（id 取自服务清单，现只有 `2api`）。
+#[tauri::command]
+pub fn start_gateway_service(id: String) -> Result<Value, String> {
+    crate::modules::gateway_services::gateway_service_start(&id)
+}
+
+/// POST 停止单个服务。
+#[tauri::command]
+pub fn stop_gateway_service(id: String) -> Result<Value, String> {
+    crate::modules::gateway_services::gateway_service_stop(&id)
+}
+
+/// POST 重启单个服务（改过网关配置之后必须走这条：端点开关只在启动时读一次）。
+#[tauri::command]
+pub fn restart_gateway_service(id: String) -> Result<Value, String> {
+    crate::modules::gateway_services::gateway_service_restart(&id)
+}
+
+// ---- gateway(私有) —— 协议端点（Anthropic Messages / OpenAI Responses） ----
+
+/// GET 协议端点状态：配置里的开关 + 两个端点的探活结果。
+#[tauri::command]
+pub fn get_gateway_protocol_status() -> Value {
+    crate::modules::gateway_protocol::gateway_protocol_status()
+}
+
+/// POST 保存协议端点开关（最小编辑 2api 的 config.json，改完需重启网关）。
+#[tauri::command]
+pub fn save_gateway_protocol_gates(gates: Value) -> Result<Value, String> {
+    crate::modules::gateway_protocol::protocol_gates_save(&gates)
 }

@@ -4,6 +4,7 @@
 //! `_find_project_jsonl` / `copy_session_to_user` / `_register_edge_sync_mapping` /
 //! `copy_sessions_for_switch` / `backup_workbuddy_db` / `workbuddy_db_path`。
 //!
+//! 硬链接共享（autoLink）已拆至 `session_share.rs`。
 //! WorkBuddy 5.x 数据三件套（缺一不可）：
 //!   1) 正文：`~/.workbuddy/projects/{workspace}/{cid}.jsonl`（JSONL 含 sessionId 字段）
 //!   2) 元数据：`~/.workbuddy/workbuddy.db` sessions 表（id = conversation id = UUID）
@@ -260,7 +261,8 @@ fn edge_sync_db_default_name(variant: WbVariant) -> &'static str {
 /// 判据不用 mtime——本工具自身写入会刷新 mtime，按它选会自我强化错误结果；
 /// 也不用行数——需逐个打开数据库，还要处理损坏与锁。两个档位走同一套发现逻辑。
 /// 目录不存在、读取失败或没有任何候选时回落到默认文件名，不得 panic。
-fn edge_sync_db_path(root: &Path, variant: WbVariant) -> PathBuf {
+/// 共享登记侧与读取侧共用的映射库路径发现（扫描 root 下最大版本号）。
+pub(crate) fn edge_sync_db_path(root: &Path, variant: WbVariant) -> PathBuf {
     let best = std::fs::read_dir(root)
         .into_iter()
         .flatten()
@@ -356,7 +358,7 @@ pub(crate) fn table_exists(conn: &Connection, name: &str) -> bool {
         == 1
 }
 
-fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
+pub(crate) fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
     let Ok(mut stmt) = conn.prepare(&format!("PRAGMA table_info({table})")) else {
         return false;
     };
@@ -365,6 +367,24 @@ fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
     };
     let names: Vec<String> = iter.flatten().collect();
     names.iter().any(|name| name == column)
+}
+
+/// 云端合表防护（P1，2026-09-25 定稿）：新版 WorkBuddy `0011` 起给 `sessions` 加
+/// `transport` 列，云端会话（transport='cloud'）将与本机会话同表混存。凡「枚举会话
+/// 参与切号复制 / 瘦身 / autoLink 决策」的入口，一律只认本机行（`transport='local'`），
+/// 防止云端行被复制、被瘦身误删。
+///
+/// - 谓词写成 `IS NULL OR = 'local'`：迁移未回填的旧行按本机对待，宁漏勿错删。
+/// - 旧库没有该列 ⇒ 返回空串（不加过滤），保持向后兼容。
+/// - `alias` 传查询里 sessions 表的别名（如 `Some("s")`），无别名传 `None`。
+pub(crate) fn local_transport_filter(conn: &Connection, alias: Option<&str>) -> String {
+    if !column_exists(conn, "sessions", "transport") {
+        return String::new();
+    }
+    match alias {
+        Some(a) => format!(" AND ({a}.transport IS NULL OR {a}.transport = 'local')"),
+        None => " AND (transport IS NULL OR transport = 'local')".to_string(),
+    }
 }
 
 fn nonempty_text(value: Option<String>) -> Option<String> {
@@ -383,19 +403,52 @@ fn account_uid(account: &Value) -> String {
 }
 
 /// WorkBuddy 侧栏展示名：优先 custom_title（用户改名 / 定时任务名），否则 title。
-fn session_display_title(title: Option<String>, custom_title: Option<String>) -> String {
+pub(crate) fn session_display_title(title: Option<String>, custom_title: Option<String>) -> String {
     nonempty_text(custom_title)
         .or_else(|| nonempty_text(title))
         .unwrap_or_else(|| "(无标题)".to_string())
 }
 
 /// Claw 是账号绑定的 IM 渠道工作区，复制会话行不够，目标账号也用不了。
-fn is_claw_workspace(cwd: &str) -> bool {
+pub(crate) fn is_claw_workspace(cwd: &str) -> bool {
     cwd.trim()
         .trim_end_matches(['/', '\\'])
         .rsplit(['/', '\\'])
         .next()
         .is_some_and(|name| name.eq_ignore_ascii_case("claw"))
+}
+
+/// 项目归属键：把 `cwd` 归一化成**同一真实项目 = 同一个 key**。
+///
+/// ★ 为什么需要（2026-09-25 实证，坑 77）：`sessions.cwd` 在本机存在**两套口径** ——
+/// App/CLI 自己建会话写 `D:/w-dev/foo`（正斜杠），切号复制体继承源行写 `D:\w-dev\foo`
+/// （反斜杠）。瘦身与共享都按「每项目保留 N 条」工作，裸字符串分组会把一个真项目拆成
+/// 两组 ⇒ keep=1 各留 1 条，用户看到 2 条；共享侧同理，同一项目被复制两遍。
+///
+/// 归一规则（只做「同一路径的等价写法」，不做大小写折叠之外的猜测）：
+///   ① 去首尾空白 ② `\` → `/` ③ 首字符盘符转大写（`d:/` 与 `D:/` 同一项目）
+///   ④ 去尾部多余 `/`（根目录 `/` 保留）⑤ 空串原样返回（无 cwd 的会话各自独立成条）。
+pub fn project_key(cwd: &str) -> String {
+    let t = cwd.trim();
+    if t.is_empty() {
+        return String::new();
+    }
+    let unified: String = t
+        .chars()
+        .map(|c| if c == '\\' { '/' } else { c })
+        .collect();
+    // 盘符大写：只看 `X:` 形态的首两字符，其余原样（Linux/Mac 无影响）。
+    let (head, rest) = unified.split_at(usize::min(2, unified.len()));
+    let head = if head.len() == 2 && head.as_bytes()[1] == b':' {
+        format!("{}:", head[..1].to_ascii_uppercase())
+    } else {
+        head.to_string()
+    };
+    let mut out = format!("{head}{rest}");
+    while out.len() > 1 && out.ends_with('/') {
+        out.pop();
+    }
+    out
 }
 
 /// 列出某账号未删除的会话（workbuddy.db sessions 表，db 为准）。
@@ -436,25 +489,27 @@ fn list_sessions_for_user_at(paths: &SessionPaths, uid: &str) -> Value {
     }
     let has_custom = column_exists(&conn, "sessions", "custom_title");
     let has_playground = column_exists(&conn, "sessions", "is_playground");
+    // 云端合表防护：列表只出本机会话（详见 local_transport_filter）
+    let tf = local_transport_filter(&conn, None);
     let sql = match (has_custom, has_playground) {
-        (true, true) => {
+        (true, true) => format!(
             "SELECT id, cwd, title, custom_title, updated_at, is_playground FROM sessions \
-             WHERE user_id = ?1 AND deleted_at IS NULL ORDER BY updated_at DESC"
-        }
-        (true, false) => {
+             WHERE user_id = ?1 AND deleted_at IS NULL{tf} ORDER BY updated_at DESC"
+        ),
+        (true, false) => format!(
             "SELECT id, cwd, title, custom_title, updated_at, 0 FROM sessions \
-             WHERE user_id = ?1 AND deleted_at IS NULL ORDER BY updated_at DESC"
-        }
-        (false, true) => {
+             WHERE user_id = ?1 AND deleted_at IS NULL{tf} ORDER BY updated_at DESC"
+        ),
+        (false, true) => format!(
             "SELECT id, cwd, title, NULL, updated_at, is_playground FROM sessions \
-             WHERE user_id = ?1 AND deleted_at IS NULL ORDER BY updated_at DESC"
-        }
-        (false, false) => {
+             WHERE user_id = ?1 AND deleted_at IS NULL{tf} ORDER BY updated_at DESC"
+        ),
+        (false, false) => format!(
             "SELECT id, cwd, title, NULL, updated_at, 0 FROM sessions \
-             WHERE user_id = ?1 AND deleted_at IS NULL ORDER BY updated_at DESC"
-        }
+             WHERE user_id = ?1 AND deleted_at IS NULL{tf} ORDER BY updated_at DESC"
+        ),
     };
-    let mut stmt = match conn.prepare(sql) {
+    let mut stmt = match conn.prepare(&sql) {
         Ok(s) => s,
         Err(_) => return json!([]),
     };
@@ -517,7 +572,7 @@ pub(crate) fn find_project_jsonl(paths: &SessionPaths, cid: &str) -> Option<Path
 ///
 /// 任何一步失败都返回 Err——不能沿用「忽略 copy 错误后仍宣称备份成功」的旧行为，
 /// 备份不可信时后续数据库写入必须先停下来（design §1）。
-fn backup_workbuddy_db(paths: &SessionPaths, backup_root: &Path) -> Result<PathBuf, String> {
+pub(crate) fn backup_workbuddy_db(paths: &SessionPaths, backup_root: &Path) -> Result<PathBuf, String> {
     let db = paths.workbuddy_db();
     if !db.is_file() {
         return Err("会话数据不存在，未复制".to_string());
@@ -543,7 +598,7 @@ fn backup_workbuddy_db(paths: &SessionPaths, backup_root: &Path) -> Result<PathB
 
 /// 数据库插入结果：`No*` 与 `SourceRowMissing` 都不允许被当成成功。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DbCopyOutcome {
+pub(crate) enum DbCopyOutcome {
     Inserted,
     SourceRowMissing,
     NoSessionsTable,
@@ -569,7 +624,7 @@ fn session_row_owner(paths: &SessionPaths, cid: &str) -> Option<String> {
 /// 目标行按**目标表列序取交集**写入——目标存在而源没有的列不写，由库默认值补齐，
 /// 不写 NULL 破坏约束（design §2.3；旧版客户端列少时靠这条兼容）。
 /// 与旧实现不同：db/表/源行缺失都显式返回，不再静默 Ok。
-fn insert_session_copy(
+pub(crate) fn insert_session_copy(
     source_paths: &SessionPaths,
     target_paths: &SessionPaths,
     new_cid: &str,
@@ -692,7 +747,10 @@ fn verify_session_row(paths: &SessionPaths, new_cid: &str, target_uid: &str) -> 
     }
 }
 
-/// 云端映射登记结果：失败必须上报，不能静默降级成成功。
+// 云端映射登记三件套（MappingOutcome / register_edge_sync_mapping{,_probed} /
+// mapping_row_matches）已迁至 `session_share.rs`（2026-09-30 最小上游足迹：它们只被
+// 共享链路使用，住 session_share 让 session.rs 相对上游少 115 行插入）。
+
 /// 把勾选的会话复制到目标账号（路径 B）。返回复制报告。
 ///
 /// 档位以**目标账号**自身为准：数据根、数据库、备份目录、认证文件都取该档位。
@@ -4302,6 +4360,23 @@ mod tests {
     use super::*;
     use crate::modules::session_link::{LinkStore, MemberState, Operation, StoreState};
     use serde_json::json;
+
+    /// 坑 77：`cwd` 的等价写法必须塌缩成同一个项目键。
+    #[test]
+    fn project_key_collapses_equivalent_writes() {
+        assert_eq!(project_key("D:/w-dev/x"), project_key("D:\\w-dev\\x"));
+        assert_eq!(project_key("d:/w-dev/x"), project_key("D:\\w-dev\\x"));
+        assert_eq!(project_key("D:/w-dev/x/"), project_key("D:\\w-dev\\x"));
+        assert_eq!(project_key("  D:/w-dev/x  "), project_key("D:\\w-dev\\x"));
+        // 不同项目不能塌缩
+        assert_ne!(project_key("D:/w-dev/x"), project_key("D:/w-dev/y"));
+        // 空 cwd 保持空（无正文会话各自独立成条，不并入别的项目）
+        assert_eq!(project_key(""), "");
+        // 根目录不被吃成一个空串
+        assert_eq!(project_key("/"), "/");
+        // POSIX 路径不受影响
+        assert_eq!(project_key("/home/w/x"), "/home/w/x");
+    }
 
     struct Env {
         root: PathBuf,

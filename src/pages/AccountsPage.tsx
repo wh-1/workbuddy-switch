@@ -2,14 +2,17 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
 import {
+  CalendarCheck,
   Columns3,
   ExternalLink,
   FileDown,
   FileUp,
   Loader2,
+  Plane,
   QrCode,
   RefreshCw,
   Rows3,
+  Sprout,
   Terminal,
 } from "lucide-react";
 
@@ -18,6 +21,7 @@ import { AccountInfoDialog } from "@/components/account-info-dialog";
 import { JetbrainsSwitchDialog } from "@/components/jetbrains-switch-dialog";
 import { CodebuddyIdeSwitchAccountDialog } from "@/components/codebuddy-ide-switch-account-dialog";
 import { DemoAction } from "@/components/demo-action";
+import { DiscoverAccountsBanner } from "@/components/discover-accounts-banner";
 import {
   CodeBuddyAiIdeMark,
   CodeBuddyCnIdeMark,
@@ -30,6 +34,7 @@ import {
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Separator } from "@/components/ui/separator";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import {
@@ -45,7 +50,10 @@ import { ImportAccountsDialog } from "@/components/import-accounts-dialog";
 import { OAuthLoginDialog } from "@/components/oauth-login-dialog";
 import { SwitchAccountDialog } from "@/components/switch-account-dialog";
 import { VscodeSwitchAccountDialog } from "@/components/vscode-switch-account-dialog";
+// gateway(私有) —— 账号卡网关状态指示（v3.2 跟随模式）
+import { GatewayFollowDot } from "@/components/gateway/GatewayFollowDot";
 import * as api from "@/lib/api";
+import { fetchActivityMap, fetchTasksMap } from "@/lib/activity-tasks";
 import { useVisibleInterval } from "@/lib/use-visible-interval";
 import {
   accountVariant,
@@ -55,11 +63,12 @@ import {
   variantDownloadDomain,
   variantLabel,
   variantSupportsCheckin,
+  variantSupportsActivity,
   variantSupportsTravel,
   variantUsesIntlCodebuddyIde,
 } from "@/lib/variant";
 import { useSupportedTools } from "@/lib/supported-tools";
-import type { AccountMeta, AppStatus, CheckinConfig, CreditExpiry, RateLimitEntry, TravelConfig, TravelStatus } from "@/lib/types";
+import type { AccountMeta, ActivityConfig, ActivityStatus, AppStatus, CheckinConfig, CreditExpiry, RateLimitEntry, TasksConfig, TasksStatus, TravelConfig, TravelStatus } from "@/lib/types";
 import { displayName } from "@/lib/account-display";
 import { cn } from "@/lib/utils";
 import { useAccountsStore } from "@/stores/accounts";
@@ -73,6 +82,10 @@ import { useAccountsStore } from "@/stores/accounts";
  *   判断「距上次扫描 ≥ 5 分钟」才发起，避免可见性切换/页面重挂载把扫描打散。
  */
 const TRAVEL_REFRESH_INTERVAL_MS = 60 * 1000;
+/** 活跃地图状态刷新周期：后台每 30 分钟才可能变一次，前端 1 分钟拉一次足够。 */
+const ACTIVITY_REFRESH_INTERVAL_MS = 60 * 1000;
+
+const TASKS_REFRESH_INTERVAL_MS = 60 * 1000;
 const RATE_LIMIT_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 /**
  * CodeBuddy CLI 认证状态的重读间隔。
@@ -163,6 +176,9 @@ async function fetchTravelMap(
   return next;
 }
 
+// fetchActivityMap / fetchTasksMap 已迁至 `@/lib/activity-tasks`（纯函数零状态耦合，
+// 2026-09-30 最小上游足迹：页面文件只留调用）。
+
 export default function AccountsPage() {
   const {
     accounts,
@@ -204,6 +220,23 @@ export default function AccountsPage() {
    * `null` = 配置尚未读到，按未开启处理。
    */
   const [autoTravelConfig, setAutoTravelConfig] = useState<TravelConfig | null>(null);
+  /**
+   * 工具条上的自动签到 / 自动旅行快捷开关的保存中状态。
+   * ⚠️ 上游 v0.1.47 已把这两个开关收敛到设置页（AccountsPage 侧整段删除），
+   * 本仓保留工具条入口 —— 与设置页同源配置，故这两个 state 必须留在本地。
+   */
+  const [autoCheckinSaving, setAutoCheckinSaving] = useState(false);
+  const [autoTravelSaving, setAutoTravelSaving] = useState(false);
+  const [autoActivityConfig, setAutoActivityConfig] = useState<ActivityConfig | null>(null);
+  const [autoActivitySaving, setAutoActivitySaving] = useState(false);
+  const [activityRunning, setActivityRunning] = useState(false);
+  /** 账号 id -> 今日活跃地图状态（undefined=查询中/未知） */
+  const [activityMap, setActivityMap] = useState<Record<string, ActivityStatus>>({});
+  const [autoTasksConfig, setAutoTasksConfig] = useState<TasksConfig | null>(null);
+  const [autoTasksSaving, setAutoTasksSaving] = useState(false);
+  const [tasksRunning, setTasksRunning] = useState(false);
+  /** 账号 id -> 今日成长任务状态（夜猫子/活动任务/任务家族；undefined=查询中/未知） */
+  const [tasksMap, setTasksMap] = useState<Record<string, TasksStatus>>({});
   /** 账号 id -> 当前受限的模型（数据源 = 后端限额台账：hook 信号 + 日志扫描） */
   const [rateLimitMap, setRateLimitMap] = useState<Record<string, RateLimitEntry[]>>({});
   /**
@@ -240,11 +273,12 @@ export default function AccountsPage() {
   );
   const appName = variantAppName(variant);
   const travelAvailable = variantSupportsTravel(variant);
+  const activityAvailable = variantSupportsActivity(variant);
   const checkinAvailable = variantSupportsCheckin(variant);
   /** 旅行 chip 与旅行状态轮询只在自动旅行开启后生效（配置未读到 = 未开启）。 */
   const autoTravelEnabled = travelAvailable && autoTravelConfig?.enabled === true;
   /** 刷新按钮文案：国际版没有签到接口，只刷新积分。 */
-  const refreshCreditsLabel = checkinAvailable ? "刷新全部账号积分并签到（仅在签到时间段内签到；忽略已关闭自动签到的账号）" : "刷新全部账号积分";
+  const refreshCreditsLabel = checkinAvailable ? "刷新全部账号积分与签到（仅在签到时间段内签到；关闭签到的账号自动跳过）" : "刷新全部账号积分";
   /** 关闭自动签到的账号 id（配置未读到/读取失败 = 空名单）。 */
   const excludedCheckinIds = useMemo(
     () => new Set(autoCheckinConfig?.excluded_account_ids ?? []),
@@ -257,6 +291,15 @@ export default function AccountsPage() {
       .filter((account) => !excludedCheckinIds.has(account.id))
       .map((account) => account.id);
   }, [visibleAccounts, checkinAvailable, autoCheckinSettled, excludedCheckinIds]);
+  const autoCheckinEnabled = autoCheckinConfig?.enabled ?? false;
+  /** 活跃地图总开关（活跃上报 + 连登管家）；国际版无成长中心，恒 false。 */
+  const autoActivityEnabled = activityAvailable && autoActivityConfig?.enabled === true;
+  /** 成长任务与活跃地图同属成长中心（仅国内版），复用同一可用性判定。 */
+  const tasksAvailable = activityAvailable;
+  const autoTasksEnabled = tasksAvailable && autoTasksConfig?.enabled === true;
+  /** 成长任务总开关口径：活跃地图或成长任务任一开启即算开（关 = 两个都关）。 */
+  const growthOn = autoActivityEnabled || autoTasksEnabled;
+  const growthSaving = autoActivitySaving || autoTasksSaving;
   /** 紧凑模式：卡片更小、同屏更多列；默认开启，持久化到 localStorage */
   const [compact, setCompact] = useState<boolean>(() => {
     try {
@@ -306,6 +349,41 @@ export default function AccountsPage() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    void api
+      .getAutoActivityConfig()
+      .then((config) => {
+        if (!cancelled) setAutoActivityConfig(config);
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          toast.error("活跃地图配置加载失败", { description: api.asError(e) });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    void api
+      .getAutoTasksConfig()
+      .then((config) => {
+        if (!cancelled) setAutoTasksConfig(config);
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          toast.error("成长任务配置加载失败", { description: api.asError(e) });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
 
   async function refreshCodebuddyCliStatus() {
     try {
@@ -444,6 +522,20 @@ export default function AccountsPage() {
     }
   }
 
+  async function loadActivityMap(accountIds: string[], isStale?: () => boolean) {
+    const next = await fetchActivityMap(accountIds, isStale);
+    if (!isStale?.() && Object.keys(next).length > 0) {
+      setActivityMap((prev) => ({ ...prev, ...next }));
+    }
+  }
+
+  async function loadTasksMap(accountIds: string[], isStale?: () => boolean) {
+    const next = await fetchTasksMap(accountIds, isStale);
+    if (!isStale?.() && Object.keys(next).length > 0) {
+      setTasksMap((prev) => ({ ...prev, ...next }));
+    }
+  }
+
   // 当前档位账号列表变化后并行查询旅行状态；之后按 TRAVEL_REFRESH_INTERVAL_MS 周期刷新，
   // 以反映后台派发/领取循环带来的状态变化。仅主窗口可见时轮询，隐藏时暂停。
   // 成长中心仅国内版开放，国际版不发请求也不展示标签；自动旅行关闭时不展示状态、不查询。
@@ -455,6 +547,28 @@ export default function AccountsPage() {
     () => void loadTravelMap(travelAccountIds),
     TRAVEL_REFRESH_INTERVAL_MS,
     autoTravelEnabled && travelAccountIds.length > 0,
+  );
+
+  // 活跃地图状态同款轮询：后台每 30 分钟才可能变，前端 1 分钟拉一次避免界面滞留旧值。
+  const activityAccountIds = useMemo(
+    () => visibleAccounts.map((account) => account.id),
+    [visibleAccounts],
+  );
+  useVisibleInterval(
+    () => void loadActivityMap(activityAccountIds),
+    ACTIVITY_REFRESH_INTERVAL_MS,
+    activityAvailable && activityAccountIds.length > 0,
+  );
+
+  // 成长任务（夜猫子/活动任务/任务家族）状态轮询：与活跃地图同节奏，避免 chip 滞留旧值。
+  const tasksAccountIds = useMemo(
+    () => visibleAccounts.map((account) => account.id),
+    [visibleAccounts],
+  );
+  useVisibleInterval(
+    () => void loadTasksMap(tasksAccountIds),
+    TASKS_REFRESH_INTERVAL_MS,
+    tasksAvailable && autoTasksEnabled && tasksAccountIds.length > 0,
   );
 
   /**
@@ -566,6 +680,159 @@ export default function AccountsPage() {
     if (!visibleAccounts.length) return;
     void ensureCredits(visibleAccounts.map((account) => account.id));
   }, [visibleAccounts, ensureCredits]);
+
+
+  async function onAutoCheckinChange(enabled: boolean) {
+    if (!autoCheckinConfig || autoCheckinSaving) return;
+    const previous = autoCheckinConfig;
+    const next = { ...previous, enabled };
+    setAutoCheckinConfig(next);
+    setAutoCheckinSaving(true);
+    try {
+      setAutoCheckinConfig(await api.saveAutoCheckinConfig(next));
+    } catch (e) {
+      setAutoCheckinConfig(previous);
+      toast.error("自动签到设置保存失败", { description: api.asError(e) });
+    } finally {
+      setAutoCheckinSaving(false);
+    }
+  }
+
+  async function onAutoTravelChange(enabled: boolean) {
+    if (!autoTravelConfig || autoTravelSaving) return;
+    const previous = autoTravelConfig;
+    const next = { ...previous, enabled };
+    setAutoTravelConfig(next);
+    setAutoTravelSaving(true);
+    try {
+      setAutoTravelConfig(await api.saveAutoTravelConfig(next));
+      if (enabled) {
+        toast.success("自动旅行已开启", { description: "正在按官方状态派发或领取" });
+        window.setTimeout(() => {
+          void loadTravelMap(visibleAccounts.map((account) => account.id));
+        }, 2500);
+      }
+    } catch (e) {
+      setAutoTravelConfig(previous);
+      toast.error("自动旅行设置保存失败", { description: api.asError(e) });
+    } finally {
+      setAutoTravelSaving(false);
+    }
+  }
+
+  async function onAutoActivityChange(enabled: boolean) {
+    if (!autoActivityConfig || autoActivitySaving) return;
+    const previous = autoActivityConfig;
+    const next = { ...previous, enabled };
+    setAutoActivityConfig(next);
+    setAutoActivitySaving(true);
+    try {
+      setAutoActivityConfig(await api.saveAutoActivityConfig(next));
+      if (enabled) {
+        toast.success("活跃地图已开启", {
+          description: "到点自动点亮连登，真断了也会用补登卡补回来",
+        });
+        window.setTimeout(() => {
+          void loadActivityMap(visibleAccounts.map((account) => account.id));
+        }, 3000);
+      }
+    } catch (e) {
+      setAutoActivityConfig(previous);
+      toast.error("活跃地图设置保存失败", { description: api.asError(e) });
+    } finally {
+      setAutoActivitySaving(false);
+    }
+  }
+
+  /** 补跑一轮活跃地图（当日已点亮的账号自动短路，零请求；跑完刷新账号卡 chip）。quiet=true 时只报错不报平安（刷新按钮顺手跑时用）。 */
+  async function onActivityRunNow(quiet = false) {
+    if (activityRunning) return;
+    setActivityRunning(true);
+    try {
+      const outcome = await api.runActivityNow() as { status?: string; done?: number; total?: number };
+      if (!quiet) {
+        if (outcome?.status === "ok" && (outcome.done ?? 0) > 0) {
+          toast.success(`点亮完成：${outcome.done}/${outcome.total} 个账号这轮办妥了`);
+        } else if (outcome?.status === "ok") {
+          toast.info("这一轮没有要办的账号", {
+            description: "今天都已经点亮过了，或者还没有国内版账号",
+          });
+        } else {
+          toast.info("上一轮还在跑，稍等一下再点");
+        }
+      }
+      void loadActivityMap(visibleAccounts.map((account) => account.id));
+    } catch (e) {
+      toast.error("没跑起来", { description: api.asError(e) });
+    } finally {
+      setActivityRunning(false);
+    }
+  }
+
+  async function onAutoTasksChange(enabled: boolean) {
+    if (!autoTasksConfig || autoTasksSaving) return;
+    const previous = autoTasksConfig;
+    const next = { ...previous, enabled };
+    setAutoTasksConfig(next);
+    setAutoTasksSaving(true);
+    try {
+      setAutoTasksConfig(await api.saveAutoTasksConfig(next));
+      if (enabled) {
+        toast.success("成长任务已开启", {
+          description: "夜猫子深夜自动办，活动任务到点自动办，任务家族领完即止；窗口内的会立刻补上",
+        });
+        window.setTimeout(() => {
+          void loadTasksMap(visibleAccounts.map((account) => account.id));
+        }, 3000);
+      }
+    } catch (e) {
+      setAutoTasksConfig(previous);
+      toast.error("成长任务设置保存失败", { description: api.asError(e) });
+    } finally {
+      setAutoTasksSaving(false);
+    }
+  }
+
+  /** 补办一轮成长任务（已办妥的段自动短路零请求，只补没办的；跑完刷新账号卡 chip）。quiet=true 时只报错不报平安。 */
+  async function onTasksRunNow(quiet = false) {
+    if (tasksRunning) return;
+    setTasksRunning(true);
+    try {
+      const outcome = await api.runTasksNow() as { status?: string; total?: number; results?: { result?: { black_cat?: { status?: string }; school?: { status?: string } } }[] };
+      if (!quiet) {
+        if (outcome?.status === "running") {
+          toast.info("上一轮还在跑，稍等一下再点");
+        } else if (outcome?.status === "ok") {
+          toast.success(`这轮办完了：${outcome.total ?? 0} 个账号过了一遍`, {
+            description: "各账号当天状态见卡片上的新芽标记",
+          });
+        } else {
+          toast.info("这轮没有要办的账号");
+        }
+      }
+      void loadTasksMap(visibleAccounts.map((account) => account.id));
+    } catch (e) {
+      toast.error("没跑起来", { description: api.asError(e) });
+    } finally {
+      setTasksRunning(false);
+    }
+  }
+
+  /** 成长任务总开关：一次开关活跃地图 + 成长任务两套配置（配置不存在的域自动跳过）。 */
+  async function onGrowthChange(enabled: boolean) {
+    await Promise.allSettled([
+      autoActivityConfig ? onAutoActivityChange(enabled) : Promise.resolve(),
+      autoTasksConfig ? onAutoTasksChange(enabled) : Promise.resolve(),
+    ]);
+  }
+
+  /** 刷新按钮合一：刷新积分；成长任务开着时顺手立即补跑一轮（静默，只报错不报平安）。 */
+  async function onRefreshAndRunNow() {
+    void onRefreshCredits();
+    if (growthOn) {
+      await Promise.allSettled([onActivityRunNow(true), onTasksRunNow(true)]);
+    }
+  }
 
   /** 导出完成提示（含安全提醒）。 */
   function onExported(count: number) {
@@ -831,6 +1098,7 @@ export default function AccountsPage() {
             </Tabs>
           </div>
           <div className="flex shrink-0 items-center gap-4 pt-1">
+            <GatewayFollowDot />
             <div className="flex items-center gap-2.5">
 {enabledTools.workbuddy && (
               <span className="group relative inline-flex cursor-default">
@@ -967,6 +1235,8 @@ export default function AccountsPage() {
         </Alert>
       )}
 
+      <DiscoverAccountsBanner onAdopted={() => void fetchAll()} />
+
       {codebuddyCli &&
         (!codebuddyCli.configured ||
           (!codebuddyUsesSettingsEnv && !codebuddyCli.helperSupportsAccountIds) ||
@@ -1029,6 +1299,108 @@ export default function AccountsPage() {
           </div>
           <TooltipProvider delayDuration={400}>
             <div className="ml-auto flex items-center gap-1">
+              {/* 自动签到仅国内版开放，国际版隐藏入口 */}
+              {checkinAvailable && (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span>
+                      <DemoAction>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className={cn("size-9 rounded-lg", autoCheckinEnabled && "bg-accent")}
+                          disabled={!autoCheckinConfig || autoCheckinSaving}
+                          onClick={() => void onAutoCheckinChange(!autoCheckinEnabled)}
+                          aria-pressed={autoCheckinEnabled}
+                          aria-label={autoCheckinEnabled ? "自动签到已开启" : "自动签到已关闭"}
+                          aria-busy={autoCheckinSaving}
+                        >
+                          {/* 品牌色必须落在图标上而非 Button：ghost 的 hover:text-accent-foreground
+                              (button.tsx:18) 特异性高于单个 text-brand，会把开启态在悬停时抹成关闭态的样子。
+                              子元素自带 color 胜过父级继承，与特异性无关。 */}
+                          {autoCheckinSaving
+                            ? <Loader2 className={cn("animate-spin", autoCheckinEnabled && "text-brand")} />
+                            : <CalendarCheck className={cn(autoCheckinEnabled && "text-brand")} />}
+                        </Button>
+                      </DemoAction>
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent side="top">
+                    {api.isDemoMode() ? "演示模式下不可操作" : `自动签到：${autoCheckinEnabled ? "已开启" : "已关闭"}`}
+                  </TooltipContent>
+                </Tooltip>
+              )}
+              {/* 成长中心（派猫猫旅行）仅国内版开放，国际版隐藏入口 */}
+              {travelAvailable && (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span>
+                      <DemoAction>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className={cn("size-9 rounded-lg", autoTravelEnabled && "bg-accent")}
+                          disabled={!autoTravelConfig || autoTravelSaving}
+                          onClick={() => void onAutoTravelChange(!autoTravelEnabled)}
+                          aria-pressed={autoTravelEnabled}
+                          aria-label={autoTravelEnabled ? "自动旅行已开启" : "自动旅行已关闭"}
+                          aria-busy={autoTravelSaving}
+                        >
+                          {/* 同签到：品牌色落在图标上，避免被 ghost 的 hover:text-accent-foreground 抹掉 */}
+                          {autoTravelSaving
+                            ? <Loader2 className={cn("animate-spin", autoTravelEnabled && "text-brand")} />
+                            : <Plane className={cn(autoTravelEnabled && "text-brand")} />}
+                        </Button>
+                      </DemoAction>
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent side="top">
+                    {api.isDemoMode() ? "演示模式下不可操作" : `自动旅行：${autoTravelEnabled ? "已开启" : "已关闭"}`}
+                  </TooltipContent>
+                </Tooltip>
+              )}
+              {/* 成长任务总开关（活跃地图 + 夜猫子 + 活动任务 + 任务家族 + 未来的成长任务）：
+                  与旅行同属成长中心，一样只在国内版出现。卡片只显示一颗新芽，
+                  立即执行并进右侧刷新按钮（开着时点刷新顺手补跑一轮）。 */}
+              {activityAvailable && (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span>
+                      <DemoAction>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className={cn("size-9 rounded-lg", growthOn && "bg-accent")}
+                          disabled={growthSaving || (!autoActivityConfig && !autoTasksConfig)}
+                          onClick={() => void onGrowthChange(!growthOn)}
+                          aria-pressed={growthOn}
+                          aria-label={growthOn ? "成长任务已开启" : "成长任务已关闭"}
+                          aria-busy={growthSaving}
+                        >
+                          {/* 同签到：品牌色落在图标上，避免被 ghost 的 hover:text-accent-foreground 抹掉 */}
+                          {growthSaving
+                            ? <Loader2 className={cn("animate-spin", growthOn && "text-brand")} />
+                            : <Sprout className={cn(growthOn && "text-brand")} />}
+                        </Button>
+                      </DemoAction>
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent side="top">
+                    {api.isDemoMode() ? (
+                      "演示模式下不可操作"
+                    ) : (
+                      <div className="flex flex-col gap-0.5">
+                        <div>成长任务：{growthOn ? "已开启" : "已关闭"}</div>
+                        <div className="text-muted-foreground">
+                          活跃地图/夜猫子/活动任务/任务家族{growthOn ? "；点右侧刷新补办没办的" : ""}
+                        </div>
+                      </div>
+                    )}
+                  </TooltipContent>
+                </Tooltip>
+              )}
+              {/* 左侧开关都隐藏时（如国际版）不画悬空分隔线 */}
+              {(checkinAvailable || travelAvailable || activityAvailable) && <Separator orientation="vertical" className="mx-2 h-5" />}
               <Tooltip>
                 <TooltipTrigger asChild>
                   <Button
@@ -1051,16 +1423,27 @@ export default function AccountsPage() {
                         variant="ghost"
                         size="icon"
                         className="size-9 rounded-lg"
-                        disabled={refreshingCredits || checkinAllRunning || visibleAccounts.length === 0}
-                        onClick={() => void onRefreshCredits()}
+                        disabled={refreshingCredits || checkinAllRunning || activityRunning || tasksRunning || visibleAccounts.length === 0}
+                        onClick={() => void onRefreshAndRunNow()}
                         aria-label={refreshCreditsLabel}
                       >
-                        <RefreshCw className={refreshingCredits || checkinAllRunning ? "animate-spin" : undefined} />
+                        <RefreshCw className={refreshingCredits || checkinAllRunning || activityRunning || tasksRunning ? "animate-spin" : undefined} />
                       </Button>
                     </DemoAction>
                   </span>
                 </TooltipTrigger>
-                <TooltipContent side="top">{api.isDemoMode() ? "演示模式下不可操作" : refreshCreditsLabel}</TooltipContent>
+                <TooltipContent side="top">
+                  {api.isDemoMode() ? (
+                    "演示模式下不可操作"
+                  ) : growthOn ? (
+                    <div className="flex flex-col gap-0.5">
+                      <div>{refreshCreditsLabel}</div>
+                      <div>成长任务开着：顺手补办没办的，已办过的自动跳过</div>
+                    </div>
+                  ) : (
+                    refreshCreditsLabel
+                  )}
+                </TooltipContent>
               </Tooltip>
             </div>
           </TooltipProvider>
@@ -1101,6 +1484,8 @@ export default function AccountsPage() {
                 todayCheckedIn={checkinMap[a.id]}
                 autoCheckinAllowed={checkinAvailable && autoCheckinSettled ? !excludedCheckinIds.has(a.id) : undefined}
                 travelStatus={autoTravelEnabled ? travelMap[a.id] : undefined}
+                activityStatus={activityMap[a.id]}
+                tasksStatus={tasksMap[a.id]}
                 rateLimits={rateLimitEnabled ? rateLimitMap[a.id] : undefined}
                 credit={creditMap[a.id]}
                 creditLoading={creditLoadingMap[a.id]}

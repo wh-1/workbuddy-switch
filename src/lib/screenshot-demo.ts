@@ -3,7 +3,9 @@ import type {
   CodeBuddyCliStatus, CodeBuddyCliSwitchResult, CodeBuddyCnIdeStatus, CreditExpiry, CreditOfficialUsageModel, CreditStatistics,
   DisplayField,
   GithubConfig, RateLimitHookStatus, RateLimitsPayload, RotateLog, RotateStatus, TokenStatistics, TokenStatsGroup, TokenStatsRequestRow, TokenStatsSource, TokenStatsTotals,
-  Session, SessionLinkPreviewGroup, SessionLinksPreview, SessionSyncVerdict, SessionGroupClient, SessionGroupSummary, SessionGroupDetail, SessionGroupList, SessionGroupPairPreview, SessionMemberVersionStatus, TravelConfig, TravelStatus, VscodeExtStatus, VscodeSessionList,
+  ActivityConfig, ActivityStatus,
+  Session, SessionLinkPreviewGroup, SessionLinksPreview, SessionSyncVerdict, SessionGroupClient, SessionGroupSummary, SessionGroupDetail, SessionGroupList, SessionGroupPairPreview, SessionMemberVersionStatus,
+  TravelConfig, TravelStatus, VscodeExtStatus, VscodeSessionList,
 } from "./types";
 import { demoModeEnabled } from "./demo-mode";
 import { accountVariant, normalizeVariant, variantSupportsCheckin } from "./variant";
@@ -409,6 +411,28 @@ function travelStatus(accountId: string): TravelStatus {
   return { label: "no-buddy", rewardCredit: null, locationName: null };
 }
 
+function activityConfig(): ActivityConfig {
+  return { enabled: true, hour: 10 };
+}
+
+/** 活跃地图演示数据：连登天数错开，展示「已达档位 / 攒天数 / 昨天已连登今天还没轮到 / 今天还没轮到」四种样子。 */
+function activityStatus(accountId: string): ActivityStatus {
+  const index = Math.max(0, accounts.findIndex((account) => account.id === accountId));
+  const today = new Date().toISOString().slice(0, 10);
+  const yesterday = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
+  if (index % 4 === 0) {
+    return { status: "done", date: today, stale: false, streakDays: 16, makeupCards: 2, makeupMax: 4, tier: "14d", redeem: "ok", lottery: "ok", gift: 0, reported: 1, message: null };
+  }
+  if (index % 4 === 1) {
+    return { status: "done", date: today, stale: false, streakDays: 4, makeupCards: 1, makeupMax: 4, tier: "", redeem: "none", lottery: "none", gift: 20, reported: 1, message: null };
+  }
+  if (index % 4 === 2) {
+    // 跨零点后、今天还没补跑：回落显示昨天那一份并标明日期（2026-10-04 新增形态）
+    return { status: "done", date: yesterday, stale: true, streakDays: 9, makeupCards: 0, makeupMax: 4, tier: "", redeem: "none", lottery: "none", gift: 0, reported: 1, message: null };
+  }
+  return { status: "pending", date: today, stale: false, streakDays: null, makeupCards: null, makeupMax: null, tier: "", redeem: "none", lottery: "none", gift: 0, reported: 0, message: null };
+}
+
 /**
  * 模型限额演示数据：A 单模型受限（图标无角标）、B 双模型受限（图标带数量角标，
  * 其中一条故意归因失败以展示「未知模型」）、C 无受限（图标不渲染）。
@@ -476,7 +500,7 @@ function rotateLogs(): RotateLog[] {
 }
 
 function demoTokenTotals(input: number, output: number, cacheRead: number, cacheWrite: number, records: number): TokenStatsTotals {
-  return { total: input + output + cacheWrite, input, output, cacheRead, cacheWrite, uncachedInput: Math.max(0, input - cacheRead), records, cacheHitRate: input > 0 ? cacheRead / input : null };
+  return { total: input + output + cacheWrite, input, output, cacheRead, cacheWrite, uncachedInput: Math.max(0, input - cacheRead), records, cacheHitRate: input > 0 ? cacheRead / input : null, avgInputPerRecord: records > 0 ? input / records : null };
 }
 
 function demoTokenGroup(key: string, input: number, output: number, cacheRead: number, cacheWrite: number, records: number): TokenStatsGroup {
@@ -765,6 +789,23 @@ export function screenshotDemoResponse(command: string, args?: Record<string, un
       return { ...appStatus, variant };
     }
     case "get_accounts": return { accounts: demoAccounts };
+    case "discover_known_accounts":
+      return {
+        accounts: demoAccounts.map((account) => ({
+          uid: account.uid,
+          nickname: account.nickname,
+          email: account.email,
+          source: "auth-history",
+          backupFiles: 3,
+          backedUpAt: futureAt(-1, 21, 0),
+          inAccountList: true,
+          accessTokenExpiresAt: account.expiresAt,
+          refreshTokenExpiresAt: account.refreshExpiresAt,
+          restorable: true,
+        })),
+      };
+    case "adopt_account": return { ok: true, account: demoAccounts[0] };
+
     // 会话管理页：按账号返回演示会话；国际版账号给一套不同 cwd，混排时可见档位差异。
     case "list_account_sessions": {
       const account = demoAccounts.find((item) => item.id === args?.accountId) ?? demoAccounts[0];
@@ -925,10 +966,12 @@ export function screenshotDemoResponse(command: string, args?: Record<string, un
     case "get_auto_checkin_config": return checkinConfig();
     case "get_checkin_logs": return { logs: checkinLogs() };
     case "get_travel_status": return travelStatus(String(args?.accountId ?? ""));
+    case "get_activity_status": return activityStatus(String(args?.accountId ?? ""));
     case "get_rate_limits": return rateLimits();
     case "get_rate_limit_hook_status": return rateLimitHookStatus();
     case "get_rate_limit_config": return { enabled: true };
     case "get_auto_travel_config": return travelConfig();
+    case "get_auto_activity_config": return activityConfig();
     case "get_auto_rotate_config": return config;
     case "rotate_status": return rotateStatus;
     case "get_rotate_logs": return { logs: rotateLogs() };

@@ -311,6 +311,16 @@ impl WbVariant {
         matches!(self, Self::Cn)
     }
 
+    /// 该档位是否支持活跃地图（对话活跃上报 + 连登管家）。
+    ///
+    /// 与旅行同口径只服务国内版：国际版 `/activity/growth/streak` 实测 500
+    /// （2api 实证，见 `reports/2api-portability-review-2026-09-22.md` 与
+    /// 2api `scheduler.go` 的 global 门控注释）—— 链上第一步就拿不到连登天数，
+    /// 后续补签/兑换全无判据，且每轮都会刷一条 WARN 污染日志。证据不足，跳过。
+    pub fn supports_activity(self) -> bool {
+        matches!(self, Self::Cn)
+    }
+
     /// 该档位是否支持签到，**同时门控请求与待签到集合**。
     ///
     /// 国际版没有签到接口：签到链路（自动周期、一键签到、单账号）在发起任何请求前

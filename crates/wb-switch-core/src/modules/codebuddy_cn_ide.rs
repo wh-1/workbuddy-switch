@@ -1165,11 +1165,11 @@ pub fn launch_codebuddy_cn() -> Result<(), String> {
 pub fn status() -> Value {
     let data_dir = codebuddy_cn_data_dir();
     let db_path = codebuddy_cn_state_db_path();
-    // `installed` 只表示"存在可运行的客户端"。数据目录存在不能算已安装——
-    // 只读探测不再建目录（issue #91），残留空目录也不应误报「已接入」；
-    // 是否有残留数据由 dataDir / dbExists 表达。
-    let installed = codebuddy_cn_app_path().is_some();
     let db_exists = db_path.as_ref().map(|p| p.exists()).unwrap_or(false);
+    // `installed` = 客户端可定位 或 state.vscdb 真实存在；两者都算已接入。
+    // ⚠️ 只看数据目录会误报：只读探测不再建目录（上游 issue #91），
+    // 而卸载后常残留空数据目录（2026-09-18 实测：甚至被别的进程重建）。
+    let installed = codebuddy_cn_app_path().is_some() || db_exists;
     let running = is_codebuddy_cn_running();
     // 登录态 = `state.vscdb` 里是否存在会话 secret 行：只查 key、不解密（macOS 解密会弹
     // 钥匙串授权，绝不能进这条轮询路径）。查询失败/文件不存在一律 false，仅用于文案与入口判定。

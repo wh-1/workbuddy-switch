@@ -241,6 +241,7 @@ function fillRangePoints(points: TokenStatsGroup[], range: RangeKey): TokenStats
         uncachedInput: 0,
         records: 0,
         cacheHitRate: null,
+        avgInputPerRecord: null,
       },
     );
     cursor.setDate(cursor.getDate() + 1);
@@ -259,6 +260,7 @@ function rangeTotals(points: TokenStatsGroup[]): TokenStatsTotals {
       uncachedInput: sum.uncachedInput + point.uncachedInput,
       records: sum.records + point.records,
       cacheHitRate: null,
+      avgInputPerRecord: null,
     }),
     {
       total: 0,
@@ -269,12 +271,15 @@ function rangeTotals(points: TokenStatsGroup[]): TokenStatsTotals {
       uncachedInput: 0,
       records: 0,
       cacheHitRate: null,
+      avgInputPerRecord: null,
     } satisfies TokenStatsTotals,
   );
 
   return {
     ...totals,
     cacheHitRate: totals.input > 0 ? totals.cacheRead / totals.input : null,
+    // 与后端 Totals::value() 同一口径：input / records（records 即调用次数）。
+    avgInputPerRecord: totals.records > 0 ? totals.input / totals.records : null,
   };
 }
 
@@ -297,11 +302,13 @@ function StatMetric({
   icon: Icon,
   label,
   value,
+  hint,
   divided = false,
 }: {
   icon: LucideIcon;
   label: string;
   value: string;
+  hint?: string;
   divided?: boolean;
 }) {
   return (
@@ -323,6 +330,11 @@ function StatMetric({
       >
         {value}
       </div>
+      {hint ? (
+        <div className="mt-1 max-w-full truncate text-[12px] leading-4 text-muted-foreground">
+          {hint}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -373,6 +385,7 @@ function Overview({ source }: { source: TokenStatsSource }) {
   const [range, setRange] = useState<OverviewRangeKey>("today");
   const summary = useMemo(() => overviewTotals(source, range), [range, source]);
   const cacheRate = summary.cacheHitRate;
+  const avgInput = summary.avgInputPerRecord;
 
   return (
     <section className="min-w-0 space-y-2.5" aria-labelledby="token-overview-title">
@@ -404,7 +417,13 @@ function Overview({ source }: { source: TokenStatsSource }) {
         </CardHeader>
         <CardContent className="grid min-w-0 grid-cols-1 divide-y divide-border/60 p-0 sm:grid-cols-4 sm:divide-y-0 sm:py-5">
           <StatMetric icon={MessagesSquare} label="总 Token" value={formatTokenCompact(tokenTotal(summary))} />
-          <StatMetric icon={ArrowUpFromLine} label="输入 Token" value={formatTokenCompact(summary.input)} divided />
+          <StatMetric
+            icon={ArrowUpFromLine}
+            label="输入 Token"
+            value={formatTokenCompact(summary.input)}
+            hint={avgInput == null ? undefined : `平均 ${formatTokenCompact(avgInput)}/次`}
+            divided
+          />
           <StatMetric
             icon={ArrowDownToLine}
             label="输出 Token"
